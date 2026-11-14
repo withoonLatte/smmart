@@ -27,6 +27,13 @@ import {
   ChevronRight,
   RefreshCw,
   Coins,
+  Edit3,
+  Ban,
+  XCircle,
+  FileText,
+  ChevronDown,
+  ChevronUp,
+  Eye,
 } from "lucide-react";
 import { api } from "@/services/api";
 import { useAuthStore } from "@/store/useAuthStore";
@@ -117,6 +124,120 @@ export const POSModule: React.FC = () => {
   const [showHeldModal, setShowHeldModal] = useState(false);
   const [recentSales, setRecentSales] = useState<any[]>([]);
   const [showRecentSalesModal, setShowRecentSalesModal] = useState(false);
+
+  // Recent Sales & Void / Edit State
+  const [selectedSaleDetail, setSelectedSaleDetail] = useState<{ id: string; items: any[] } | null>(null);
+  const [saleDetailLoading, setSaleDetailLoading] = useState(false);
+  const [voidConfirmSale, setVoidConfirmSale] = useState<any | null>(null);
+  const [voidReason, setVoidReason] = useState<string>("ลูกค้าเปลี่ยนใจ / คืนสินค้า");
+  const [isVoiding, setIsVoiding] = useState(false);
+  const [searchRecentSales, setSearchRecentSales] = useState("");
+
+  const handleViewSaleDetail = async (sale: any) => {
+    if (selectedSaleDetail?.id === sale.id) {
+      setSelectedSaleDetail(null);
+      return;
+    }
+    setSaleDetailLoading(true);
+    try {
+      const res = await api.getSale(sale.id);
+      setSelectedSaleDetail({ id: sale.id, items: res.items || [] });
+    } catch (err) {
+      console.error("Failed to load sale items", err);
+    } finally {
+      setSaleDetailLoading(false);
+    }
+  };
+
+  const handleVoidSale = async (sale: any, reason: string) => {
+    if (!reason.trim()) {
+      alert("กรุณาระบุเหตุผลในการยกเลิกบิล");
+      return;
+    }
+    setIsVoiding(true);
+    try {
+      const res = await api.voidSale(sale.id, { reason: reason.trim() });
+      if (res.success) {
+        alert(`ยกเลิกบิล ${sale.invoice_no} เรียบร้อยแล้ว สต๊อกสินค้าถูกคืนเข้าสู่ระบบ`);
+        setVoidConfirmSale(null);
+        setVoidReason("ลูกค้าเปลี่ยนใจ / คืนสินค้า");
+        loadData();
+      } else {
+        alert(res.message || "ไม่สามารถยกเลิกบิลได้");
+      }
+    } catch (err: any) {
+      alert(err.message || "เกิดข้อผิดพลาดในการยกเลิกบิล");
+    } finally {
+      setIsVoiding(false);
+    }
+  };
+
+  const handleEditBill = async (sale: any) => {
+    if (cart.length > 0) {
+      const confirmOverwrite = window.confirm(
+        "มีรายการสินค้าอยู่ในตะกร้าปัจจุบัน หากดึงบิลนี้มาแก้ไข รายการในตะกร้าปัจจุบันจะถูกแทนที่ ต้องการดำเนินการต่อหรือไม่?"
+      );
+      if (!confirmOverwrite) return;
+    }
+
+    const confirmVoidAndEdit = window.confirm(
+      `ต้องการยกเลิกบิล ${sale.invoice_no} และดึงรายการสินค้ากลับมาแก้ไขในตะกร้า POS หรือไม่?\n\n(ระบบจะทำการคืนสต๊อกของบิลเดิมอัตโนมัติ เพื่อให้ท่านปรับแก้จำนวนหรือเพิ่มลดสินค้าและคิดเงินใหม่)`
+    );
+    if (!confirmVoidAndEdit) return;
+
+    setIsVoiding(true);
+    try {
+      // 1. Fetch item details of the bill
+      const detailRes = await api.getSale(sale.id);
+      const items = detailRes.items || [];
+
+      // 2. Void original bill
+      await api.voidSale(sale.id, { reason: "ดึงบิลกลับมาแก้ไข (Void & Edit to Cart)" });
+
+      // 3. Map items to Cart
+      const newCart: CartItem[] = items.map((it: any) => {
+        const matchedProd = products.find((p) => p.id === it.product_id) || {
+          id: it.product_id,
+          sku: it.barcode || "",
+          barcode: it.barcode || "",
+          name: it.product_name,
+          unit: it.unit || "ชิ้น",
+          selling_price: Number(it.unit_price),
+          cost_price: Number(it.cost_price) || 0,
+          current_stock: 999,
+          min_stock: 0,
+          max_stock: 999,
+          category_id: "",
+          is_vat: 1,
+          is_active: 1,
+        };
+        return {
+          product: matchedProd as Product,
+          quantity: Number(it.quantity),
+          unit_price: Number(it.unit_price),
+          discount: Number(it.discount_amount) || 0,
+          subtotal: Number(it.subtotal),
+        };
+      });
+
+      setCart(newCart);
+      setCustomDiscount(Number(sale.discount_amount) || 0);
+
+      if (sale.customer_id) {
+        const matchedCust = customers.find((c) => c.id === sale.customer_id);
+        if (matchedCust) setSelectedCustomer(matchedCust);
+      }
+
+      setShowRecentSalesModal(false);
+      setVoidConfirmSale(null);
+      loadData();
+      alert(`ดึงรายการสินค้าจากบิล ${sale.invoice_no} มายังตะกร้าเรียบร้อยแล้ว สามารถแก้ไขและคิดเงินใหม่ได้ทันที`);
+    } catch (err: any) {
+      alert(err.message || "เกิดข้อผิดพลาดในการดึงบิลมาแก้ไข");
+    } finally {
+      setIsVoiding(false);
+    }
+  };
 
   // Audio beep for barcode scan
   const playBeep = () => {
@@ -683,11 +804,14 @@ export const POSModule: React.FC = () => {
               </button>
 
               <button
-                onClick={() => setShowRecentSalesModal(true)}
-                className="py-2 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 font-bold text-xs text-slate-700 flex items-center justify-center gap-1 shadow-sm"
+                onClick={() => {
+                  setShowRecentSalesModal(true);
+                  loadData();
+                }}
+                className="py-2 rounded-xl border border-blue-200 bg-blue-50/70 hover:bg-blue-100 font-bold text-xs text-blue-700 flex items-center justify-center gap-1 shadow-sm transition-all"
               >
-                <Printer className="w-3.5 h-3.5 text-slate-600" />
-                <span>พิมพ์สลิปซ้ำ</span>
+                <Receipt className="w-3.5 h-3.5 text-blue-600" />
+                <span>บิลล่าสุด / จัดการ</span>
               </button>
 
               <button
@@ -1029,42 +1153,324 @@ export const POSModule: React.FC = () => {
       )}
 
       {/* ======================================================== */}
-      {/* MODAL: RECENT SALES (REPRINT) */}
+      {/* MODAL: RECENT SALES (VIEW, REPRINT, EDIT, VOID) */}
       {/* ======================================================== */}
       {showRecentSalesModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4 animate-in fade-in">
-          <div className="bg-white rounded-3xl max-w-lg w-full p-6 shadow-modal border border-slate-200">
-            <h3 className="text-base font-bold text-slate-900 mb-3">พิมพ์ใบเสร็จย้อนหลัง (Reprint Recent Receipt)</h3>
-            <div className="space-y-2 max-h-80 overflow-y-auto pr-1">
-              {recentSales.slice(0, 10).map((s) => (
-                <div
-                  key={s.id}
-                  className="p-3 rounded-2xl bg-slate-50 border border-slate-200 flex items-center justify-between text-xs"
-                >
-                  <div>
-                    <span className="font-mono font-bold text-blue-600">{s.invoice_no}</span>
-                    <span className="block text-slate-500">
-                      {new Date(s.created_at).toLocaleTimeString("th-TH")} • ฿{Number(s.grand_total).toFixed(2)}
-                    </span>
-                  </div>
-                  <button
-                    onClick={() => {
-                      handlePrintSlip(s);
-                      setShowRecentSalesModal(false);
-                    }}
-                    className="px-3 py-1.5 rounded-xl bg-slate-800 text-white font-bold flex items-center gap-1 shadow-sm"
-                  >
-                    <Printer className="w-3.5 h-3.5" /> พิมพ์
-                  </button>
+          <div className="bg-white rounded-3xl max-w-2xl w-full p-6 shadow-modal border border-slate-200 flex flex-col max-h-[90vh]">
+            {/* Header */}
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+              <div className="flex items-center gap-2.5">
+                <div className="w-9 h-9 rounded-2xl bg-blue-50 text-blue-600 flex items-center justify-center">
+                  <Receipt className="w-5 h-5" />
                 </div>
-              ))}
+                <div>
+                  <h3 className="text-base font-black text-slate-900">รายการขายล่าสุด & จัดการบิล</h3>
+                  <p className="text-[11px] text-slate-500">พิมพ์สลิปซ้ำ แก้ไขรายการ หรือยกเลิกบิลเพื่อคืนสต๊อก</p>
+                </div>
+              </div>
+              <button
+                onClick={() => {
+                  setShowRecentSalesModal(false);
+                  setSelectedSaleDetail(null);
+                }}
+                className="w-8 h-8 rounded-full hover:bg-slate-100 flex items-center justify-center text-slate-400 hover:text-slate-600 transition-colors"
+              >
+                <XCircle className="w-5 h-5" />
+              </button>
             </div>
-            <button
-              onClick={() => setShowRecentSalesModal(false)}
-              className="mt-4 w-full py-2 rounded-xl border border-slate-200 text-xs font-semibold text-slate-600 hover:bg-slate-50"
-            >
-              ปิดหน้าต่าง
-            </button>
+
+            {/* Filter Search */}
+            <div className="pt-3 pb-2">
+              <div className="relative">
+                <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                <input
+                  type="text"
+                  placeholder="ค้นหาเลขที่บิล (เช่น INV-...) หรือชื่อพนักงาน..."
+                  value={searchRecentSales}
+                  onChange={(e) => setSearchRecentSales(e.target.value)}
+                  className="w-full pl-9 pr-4 py-2 rounded-xl bg-slate-50 border border-slate-200 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+            </div>
+
+            {/* Sales List */}
+            <div className="space-y-3 overflow-y-auto pr-1 flex-1 py-2">
+              {recentSales
+                .filter((s) => {
+                  if (!searchRecentSales.trim()) return true;
+                  const term = searchRecentSales.toLowerCase();
+                  return (
+                    s.invoice_no?.toLowerCase().includes(term) ||
+                    s.cashier_name?.toLowerCase().includes(term) ||
+                    s.customer_name?.toLowerCase().includes(term)
+                  );
+                })
+                .slice(0, 20)
+                .map((s) => {
+                  const isVoided = s.status === "voided";
+                  const isExpanded = selectedSaleDetail?.id === s.id;
+
+                  return (
+                    <div
+                      key={s.id}
+                      className={`p-3.5 rounded-2xl border transition-all ${
+                        isVoided
+                          ? "bg-rose-50/40 border-rose-200"
+                          : "bg-white border-slate-200 hover:border-slate-300 shadow-sm"
+                      }`}
+                    >
+                      {/* Top Bar of Sale Card */}
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <span className="font-mono font-black text-xs text-blue-600">{s.invoice_no}</span>
+                            <span
+                              className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                                isVoided
+                                  ? "bg-rose-100 text-rose-800"
+                                  : "bg-emerald-100 text-emerald-800"
+                              }`}
+                            >
+                              {isVoided ? "ยกเลิกแล้ว" : "สำเร็จ"}
+                            </span>
+                            <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-slate-100 text-slate-600">
+                              {s.payment_method === "cash"
+                                ? "เงินสด"
+                                : s.payment_method === "promptpay"
+                                ? "พร้อมเพย์"
+                                : s.payment_method === "card"
+                                ? "บัตร"
+                                : "โอน"}
+                            </span>
+                          </div>
+
+                          <div className="text-[11px] text-slate-500 mt-1 flex items-center gap-2">
+                            <span className="flex items-center gap-1">
+                              <Clock className="w-3 h-3 text-slate-400" />
+                              {new Date(s.created_at).toLocaleTimeString("th-TH", {
+                                hour: "2-digit",
+                                minute: "2-digit",
+                              })}{" "}
+                              น.
+                            </span>
+                            <span>•</span>
+                            <span>แคชเชียร์: {s.cashier_name || "พนักงาน"}</span>
+                            {s.customer_name && (
+                              <>
+                                <span>•</span>
+                                <span className="text-blue-600 font-medium">ลูกค้า: {s.customer_name}</span>
+                              </>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Amount & Actions */}
+                        <div className="text-right flex flex-col items-end">
+                          <span
+                            className={`text-base font-black tracking-tight ${
+                              isVoided ? "text-slate-400 line-through" : "text-slate-900"
+                            }`}
+                          >
+                            ฿{Number(s.grand_total).toFixed(2)}
+                          </span>
+
+                          {/* Quick Action Buttons */}
+                          <div className="flex items-center gap-1.5 mt-2">
+                            {/* View detail button */}
+                            <button
+                              onClick={() => handleViewSaleDetail(s)}
+                              className="px-2.5 py-1 rounded-lg border border-slate-200 hover:bg-slate-100 text-[11px] font-bold text-slate-600 flex items-center gap-1 transition-colors"
+                              title="ดูรายการสินค้า"
+                            >
+                              <Eye className="w-3 h-3 text-slate-500" />
+                              <span>{isExpanded ? "ซ่อน" : "สินค้า"}</span>
+                            </button>
+
+                            {/* Reprint button */}
+                            <button
+                              onClick={() => handlePrintSlip(s)}
+                              className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-900 text-white text-[11px] font-bold flex items-center gap-1 shadow-xs transition-colors"
+                              title="พิมพ์สลิปใบเสร็จ"
+                            >
+                              <Printer className="w-3 h-3" />
+                              <span>พิมพ์</span>
+                            </button>
+
+                            {/* Edit bill button */}
+                            {!isVoided && (
+                              <button
+                                onClick={() => handleEditBill(s)}
+                                disabled={isVoiding}
+                                className="px-2.5 py-1 rounded-lg border border-amber-300 bg-amber-50 hover:bg-amber-100 text-amber-800 text-[11px] font-bold flex items-center gap-1 transition-colors disabled:opacity-50"
+                                title="ดึงบิลกลับมาแก้ไขในตะกร้า"
+                              >
+                                <Edit3 className="w-3 h-3 text-amber-600" />
+                                <span>แก้ไขบิล</span>
+                              </button>
+                            )}
+
+                            {/* Void bill button */}
+                            {!isVoided && (
+                              <button
+                                onClick={() => setVoidConfirmSale(s)}
+                                disabled={isVoiding}
+                                className="px-2.5 py-1 rounded-lg border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-700 text-[11px] font-bold flex items-center gap-1 transition-colors disabled:opacity-50"
+                                title="ยกเลิกบิลและคืนสต๊อก"
+                              >
+                                <Ban className="w-3 h-3" />
+                                <span>ยกเลิกบิล</span>
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Void Reason Notice */}
+                      {isVoided && (
+                        <div className="mt-2.5 pt-2 border-t border-rose-100 text-[11px] text-rose-700 flex items-center justify-between">
+                          <span>
+                            <strong>เหตุผลที่ยกเลิก:</strong> {s.void_reason || "ลูกค้ายกเลิก/คืนสินค้า"}
+                          </span>
+                          <span className="text-[10px] text-rose-500">
+                            อนุมัติโดย: {s.void_approved_by || "-"}
+                          </span>
+                        </div>
+                      )}
+
+                      {/* Expanded Items Table */}
+                      {isExpanded && (
+                        <div className="mt-3 pt-3 border-t border-slate-100 animate-in fade-in">
+                          <h4 className="text-[11px] font-bold text-slate-700 mb-1.5 flex items-center gap-1">
+                            <FileText className="w-3 h-3 text-blue-500" /> รายการสินค้าในบิล
+                          </h4>
+                          {saleDetailLoading ? (
+                            <div className="py-3 text-center text-xs text-slate-400">กำลังโหลดรายการ...</div>
+                          ) : (
+                            <div className="bg-slate-50/80 rounded-xl p-2 space-y-1 text-xs">
+                              {selectedSaleDetail?.items.map((it: any) => (
+                                <div key={it.id} className="flex justify-between items-center text-[11px]">
+                                  <span className="font-medium text-slate-700">
+                                    {it.product_name}{" "}
+                                    <span className="text-slate-400 font-mono text-[10px]">
+                                      x{it.quantity} {it.unit || "ชิ้น"}
+                                    </span>
+                                  </span>
+                                  <span className="font-mono font-bold text-slate-900">
+                                    ฿{Number(it.subtotal).toFixed(2)}
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+
+              {recentSales.length === 0 && (
+                <div className="py-8 text-center text-xs text-slate-400">ยังไม่มีรายการขายในระบบ</div>
+              )}
+            </div>
+
+            {/* Modal Footer */}
+            <div className="pt-3 border-t border-slate-100 flex justify-end">
+              <button
+                onClick={() => {
+                  setShowRecentSalesModal(false);
+                  setSelectedSaleDetail(null);
+                }}
+                className="px-5 py-2 rounded-xl border border-slate-200 text-xs font-bold text-slate-600 hover:bg-slate-50"
+              >
+                ปิดหน้าต่าง
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ======================================================== */}
+      {/* SUB-MODAL: CONFIRM VOID BILL */}
+      {/* ======================================================== */}
+      {voidConfirmSale && (
+        <div className="fixed inset-0 z-60 flex items-center justify-center bg-slate-900/70 backdrop-blur-sm p-4 animate-in zoom-in-95">
+          <div className="bg-white rounded-3xl max-w-md w-full p-6 shadow-modal border border-slate-200">
+            <div className="w-12 h-12 rounded-2xl bg-rose-50 text-rose-600 flex items-center justify-center mb-3">
+              <AlertCircle className="w-6 h-6" />
+            </div>
+
+            <h3 className="text-base font-black text-slate-900">ยืนยันการยกเลิกบิล</h3>
+            <p className="text-xs text-slate-500 mt-1">
+              บิลเลขที่ <span className="font-mono font-bold text-blue-600">{voidConfirmSale.invoice_no}</span> • ยอดรวม{" "}
+              <span className="font-bold text-slate-900">฿{Number(voidConfirmSale.grand_total).toFixed(2)}</span>
+            </p>
+
+            <div className="mt-3 p-3 rounded-2xl bg-amber-50 border border-amber-200 text-[11px] text-amber-800 leading-relaxed">
+              ⚠️ การยกเลิกบิลจะทำการ <strong>คืนสต๊อกสินค้าทุกชิ้นเข้าสู่ชั้นวาง</strong> และ{" "}
+              <strong>ปรับลดยอดเงินในกะแคชเชียร์</strong> อัตโนมัติในระดับฐานข้อมูล
+            </div>
+
+            {/* Quick Reason Selector */}
+            <div className="mt-3">
+              <label className="text-xs font-bold text-slate-700 block mb-1.5">เลือกเหตุผลในการยกเลิกบิล:</label>
+              <div className="grid grid-cols-2 gap-1.5 mb-2">
+                {[
+                  "ลูกค้าเปลี่ยนใจ / คืนสินค้า",
+                  "คิดเงินผิด / สแกนสินค้าซ้ำ",
+                  "ลูกค้าเงินไม่พอ / ขอยกเลิก",
+                  "สินค้าชำรุด / มีตำหนิ",
+                ].map((reason) => (
+                  <button
+                    key={reason}
+                    type="button"
+                    onClick={() => setVoidReason(reason)}
+                    className={`p-2 rounded-xl text-[10px] font-bold border text-left transition-all ${
+                      voidReason === reason
+                        ? "bg-rose-50 border-rose-300 text-rose-800 shadow-xs"
+                        : "bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100"
+                    }`}
+                  >
+                    {reason}
+                  </button>
+                ))}
+              </div>
+
+              <input
+                type="text"
+                placeholder="ระบุเหตุผลเพิ่มเติม (ถ้ามี)..."
+                value={voidReason}
+                onChange={(e) => setVoidReason(e.target.value)}
+                className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs bg-slate-50 focus:outline-none focus:ring-2 focus:ring-rose-500"
+              />
+            </div>
+
+            {/* Actions */}
+            <div className="mt-5 flex gap-2">
+              <button
+                type="button"
+                onClick={() => setVoidConfirmSale(null)}
+                disabled={isVoiding}
+                className="flex-1 py-2.5 rounded-xl border border-slate-200 font-bold text-xs text-slate-600 hover:bg-slate-50 disabled:opacity-50"
+              >
+                ย้อนกลับ
+              </button>
+              <button
+                type="button"
+                onClick={() => handleVoidSale(voidConfirmSale, voidReason)}
+                disabled={isVoiding || !voidReason.trim()}
+                className="flex-1 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs shadow-md shadow-rose-600/20 disabled:opacity-50 flex items-center justify-center gap-1.5"
+              >
+                {isVoiding ? (
+                  <RefreshCw className="w-4 h-4 animate-spin" />
+                ) : (
+                  <>
+                    <Ban className="w-4 h-4" />
+                    <span>ยืนยันยกเลิกบิล</span>
+                  </>
+                )}
+              </button>
+            </div>
           </div>
         </div>
       )}

@@ -1081,8 +1081,33 @@ app.get("/pos/sales", authMiddleware, requirePermission("pos.access"), async (c)
   return c.json({ success: true, data: sales.results });
 });
 
-// Void / Refund Sale (Manager/Admin Approval Required)
-app.post("/pos/sales/:id/void", authMiddleware, requirePermission("pos.void_approve"), async (c) => {
+// Get Single Sale Detail with items
+app.get("/pos/sales/:id", authMiddleware, requirePermission("pos.access"), async (c) => {
+  const saleId = c.req.param("id");
+  const db = c.env.DB;
+  const user = c.get("user")!;
+
+  const sale: any = await db.prepare(
+    `SELECT s.*, e.full_name as cashier_name 
+     FROM sales s 
+     LEFT JOIN employees e ON e.id = s.cashier_id 
+     WHERE s.id = ?`
+  ).bind(saleId).first();
+
+  if (!sale) return c.json({ success: false, error: "ไม่พบบิลการขาย" }, 404);
+
+  // Cashier isolation check
+  if (user.role_code === "CASHIER" && sale.cashier_id !== user.id) {
+    return c.json({ success: false, error: "ปฏิเสธการเข้าถึง: แคชเชียร์สามารถดูได้เฉพาะบิลของตนเอง" }, 403);
+  }
+
+  const items = await db.prepare("SELECT * FROM sale_items WHERE sale_id = ?").bind(saleId).all();
+
+  return c.json({ success: true, sale, items: items.results });
+});
+
+// Void / Refund Sale (Manager/Admin Approval or Cashier with self-issued bill)
+app.post("/pos/sales/:id/void", authMiddleware, requireAnyPermission("pos.void_approve", "pos.void_request", "pos.access"), async (c) => {
   const saleId = c.req.param("id");
   const { reason } = await c.req.json();
   const db = c.env.DB;
@@ -1092,6 +1117,16 @@ app.post("/pos/sales/:id/void", authMiddleware, requirePermission("pos.void_appr
   if (!sale) return c.json({ success: false, error: "ไม่พบบิลการขาย" }, 404);
   if (sale.status === "voided") return c.json({ success: false, error: "บิลนี้ถูกยกเลิกไปแล้ว" }, 400);
 
+  // Cashier can only void their own sale unless they have manager/owner void_approve permission
+  const canVoidAny = user.role_code === "OWNER_ADMIN" || user.role_code === "MANAGER" || user.permissions.includes("pos.void_approve");
+  if (!canVoidAny && sale.cashier_id !== user.id) {
+    return c.json({
+      success: false,
+      error: "UNAUTHORIZED_VOID",
+      message: "พนักงานแคชเชียร์สามารถยกเลิกได้เฉพาะบิลที่ตนเองเป็นผู้ออกบิลเท่านั้น การยกเลิกบิลของผู้อื่นต้องได้รับการอนุมัติจากผู้จัดการ",
+    }, 403);
+  }
+
   const items = await db.prepare("SELECT * FROM sale_items WHERE sale_id = ?").bind(saleId).all();
 
   const batch = [
@@ -1099,16 +1134,18 @@ app.post("/pos/sales/:id/void", authMiddleware, requirePermission("pos.void_appr
       `UPDATE sales SET 
         status = 'voided',
         void_reason = ?,
-        void_approved_by = ?
+        void_approved_by = ?,
+        updated_at = datetime('now', 'localtime')
        WHERE id = ?`
     ).bind(reason || 'ลูกค้ายกเลิก/คืนสินค้า', user.full_name, saleId),
     db.prepare(
       `INSERT INTO audit_logs (id, user_id, user_name, action, module, record_id, details)
        VALUES (?, ?, ?, 'POS_VOID', 'POS', ?, ?)`
-    ).bind(genId("aud"), user.id, user.full_name, saleId, `ยกเลิกบิล ${sale.invoice_no} เหตุผล: ${reason}`)
+    ).bind(genId("aud"), user.id, user.full_name, saleId, `ยกเลิกบิล ${sale.invoice_no} เหตุผล: ${reason || 'ยกเลิกบิล/แก้ไข'}`)
   ];
 
   // Restock items back to loc_shelf atomically
+  // Note: Trigger trg_sync_inventory_update automatically recalculates products.current_stock!
   for (const item of items.results as any[]) {
     batch.push(
       db.prepare(
@@ -1129,8 +1166,67 @@ app.post("/pos/sales/:id/void", authMiddleware, requirePermission("pos.void_appr
     );
   }
 
+  // Adjust Cashier Shift Drawer if shift_id exists
+  if (sale.shift_id) {
+    if (sale.payment_method === "cash") {
+      batch.push(
+        db.prepare(
+          `UPDATE cashier_shifts SET 
+            total_sales = MAX(0, total_sales - ?),
+            cash_sales = MAX(0, cash_sales - ?),
+            expected_cash = MAX(0, expected_cash - ?)
+           WHERE id = ?`
+        ).bind(sale.grand_total, sale.grand_total, sale.grand_total, sale.shift_id)
+      );
+    } else if (sale.payment_method === "promptpay") {
+      batch.push(
+        db.prepare(
+          `UPDATE cashier_shifts SET 
+            total_sales = MAX(0, total_sales - ?),
+            promptpay_sales = MAX(0, promptpay_sales - ?)
+           WHERE id = ?`
+        ).bind(sale.grand_total, sale.grand_total, sale.shift_id)
+      );
+    } else if (sale.payment_method === "card") {
+      batch.push(
+        db.prepare(
+          `UPDATE cashier_shifts SET 
+            total_sales = MAX(0, total_sales - ?),
+            card_sales = MAX(0, card_sales - ?)
+           WHERE id = ?`
+        ).bind(sale.grand_total, sale.grand_total, sale.shift_id)
+      );
+    } else {
+      batch.push(
+        db.prepare(
+          `UPDATE cashier_shifts SET 
+            total_sales = MAX(0, total_sales - ?),
+            transfer_sales = MAX(0, transfer_sales - ?)
+           WHERE id = ?`
+        ).bind(sale.grand_total, sale.grand_total, sale.shift_id)
+      );
+    }
+  }
+
+  // Deduct customer points if member purchase
+  if (sale.customer_id) {
+    const earnedPoints = Math.floor(sale.grand_total / 50);
+    batch.push(
+      db.prepare(
+        `UPDATE customers SET 
+          points = MAX(0, points - ?),
+          total_spent = MAX(0, total_spent - ?)
+         WHERE id = ?`
+      ).bind(earnedPoints, sale.grand_total, sale.customer_id)
+    );
+  }
+
   await db.batch(batch);
-  return c.json({ success: true, message: `ยกเลิกบิล ${sale.invoice_no} และคืนสต๊อกเข้าสู่ชั้นวางเรียบร้อยแล้ว` });
+  return c.json({
+    success: true,
+    message: `ยกเลิกบิล ${sale.invoice_no} และคืนสต๊อกเข้าสู่ชั้นวางเรียบร้อยแล้ว`,
+    items: items.results,
+  });
 });
 
 // -------------------------------------------------------------------

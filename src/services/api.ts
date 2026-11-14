@@ -71,8 +71,9 @@ export const api = {
       body: JSON.stringify(data),
     }),
   getSales: () => request<{ success: boolean; data: any[] }>("/pos/sales"),
+  getSale: (id: string) => request<{ success: boolean; sale: any; items: any[] }>(`/pos/sales/${id}`),
   voidSale: (id: string, data: { reason: string }) =>
-    request<{ success: boolean; message: string }>(`/pos/sales/${id}/void`, {
+    request<{ success: boolean; message: string; items?: any[] }>(`/pos/sales/${id}/void`, {
       method: "POST",
       body: JSON.stringify(data),
     }),
