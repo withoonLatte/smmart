@@ -461,6 +461,27 @@ CREATE TABLE IF NOT EXISTS audit_logs (
   created_at TEXT DEFAULT (datetime('now', 'localtime'))
 );
 
+-- 32. User Sessions (Secure Token Authentication & Expiration)
+CREATE TABLE IF NOT EXISTS user_sessions (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  token TEXT UNIQUE NOT NULL,
+  role_code TEXT NOT NULL,
+  ip_address TEXT,
+  user_agent TEXT,
+  expires_at TEXT NOT NULL,
+  created_at TEXT DEFAULT (datetime('now', 'localtime')),
+  FOREIGN KEY (user_id) REFERENCES employees(id) ON DELETE CASCADE
+);
+
+-- 33. Idempotency Keys (Prevent Duplicate Checkout & API Requests)
+CREATE TABLE IF NOT EXISTS idempotency_keys (
+  key TEXT PRIMARY KEY,
+  user_id TEXT,
+  response_body TEXT NOT NULL,
+  created_at TEXT DEFAULT (datetime('now', 'localtime'))
+);
+
 -- Indexes for Speed
 CREATE INDEX IF NOT EXISTS idx_products_barcode ON products(barcode);
 CREATE INDEX IF NOT EXISTS idx_products_sku ON products(sku);
@@ -468,3 +489,5 @@ CREATE INDEX IF NOT EXISTS idx_inventory_lookup ON inventory(product_id, locatio
 CREATE INDEX IF NOT EXISTS idx_sales_created_at ON sales(created_at);
 CREATE INDEX IF NOT EXISTS idx_sales_invoice ON sales(invoice_no);
 CREATE INDEX IF NOT EXISTS idx_movements_prod ON inventory_movements(product_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_token ON user_sessions(token);
+CREATE INDEX IF NOT EXISTS idx_sessions_expires ON user_sessions(expires_at);

@@ -89,7 +89,7 @@ export const PurchasingModule: React.FC = () => {
   const handleApprovePO = async (id: string) => {
     if (!confirm("อนุมัติใบสั่งซื้อนี้เพื่อส่งไปยังซัพพลายเออร์และฝ่ายคลังสินค้า?")) return;
     try {
-      await api.approvePurchaseOrder(id, currentUser?.full_name || "Manager");
+      await api.approvePurchaseOrder(id);
       alert("อนุมัติใบสั่งซื้อเรียบร้อยแล้ว");
       loadData();
     } catch (err: any) {

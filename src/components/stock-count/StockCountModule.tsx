@@ -129,7 +129,7 @@ export const StockCountModule: React.FC = () => {
     if (!confirm("ยืนยันการอนุมัติและปรับปรุงยอดสต๊อกในระบบจริงตามผลต่างที่ตรวจนับได้?")) return;
 
     try {
-      const res = await api.approveStockCount(selectedTask.id, currentUser?.full_name || "Manager");
+      const res = await api.approveStockCount(selectedTask.id);
       alert(res.message);
       handleSelectTask(selectedTask.id);
       loadTasks();

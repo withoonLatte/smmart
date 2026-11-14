@@ -19,9 +19,9 @@ export const Header: React.FC<HeaderProps> = ({ onSelectModule }) => {
   const { currentUser, activeRole, switchRole } = useAuthStore();
   const [showRoleMenu, setShowRoleMenu] = useState(false);
 
-  const handleRoleSelect = (role: RoleCode) => {
-    switchRole(role);
+  const handleRoleSelect = async (role: RoleCode) => {
     setShowRoleMenu(false);
+    await switchRole(role);
     onSelectModule(ROLE_PRESETS[role].defaultPath);
   };
 

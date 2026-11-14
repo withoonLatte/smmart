@@ -111,15 +111,15 @@ INSERT OR REPLACE INTO role_permissions (role_id, permission_code) VALUES
 ('role_accounting', 'accounting.access'), ('role_accounting', 'accounting.expenses'), ('role_accounting', 'accounting.reports'),
 ('role_accounting', 'reports.view');
 
--- Default Employees
+-- Default Employees (PBKDF2-SHA256 salted hashes for password '123456')
 INSERT OR REPLACE INTO employees (id, employee_code, username, password_hash, full_name, role_code, email, phone, position, status) VALUES
-('emp_owner', 'EMP-001', 'owner', '123456', 'คุณวิทูรย์ ลาเต้ (เจ้าของร้าน)', 'OWNER_ADMIN', 'owner@happymart.co.th', '089-111-2222', 'เจ้าของกิจการ / CEO', 'active'),
-('emp_manager', 'EMP-002', 'manager', '123456', 'คุณสมชาย บริหารดี (ผู้จัดการ)', 'MANAGER', 'manager@happymart.co.th', '089-222-3333', 'ผู้จัดการร้าน', 'active'),
-('emp_cashier1', 'EMP-003', 'cashier', '123456', 'คุณนภา ขายคล่อง (แคชเชียร์ 1)', 'CASHIER', 'cashier1@happymart.co.th', '089-333-4444', 'พนักงานแคชเชียร์', 'active'),
-('emp_checker1', 'EMP-004', 'checker', '123456', 'คุณธีระ นับตรง (ตรวจนับ)', 'STOCK_CHECKER', 'checker@happymart.co.th', '089-444-5555', 'พนักงานตรวจสต๊อก', 'active'),
-('emp_wh1', 'EMP-005', 'warehouse', '123456', 'คุณมนัส จัดคลัง (พนักงานคลัง)', 'WAREHOUSE', 'warehouse@happymart.co.th', '089-555-6666', 'หัวหน้าคลังสินค้า', 'active'),
-('emp_pur1', 'EMP-006', 'purchaser', '123456', 'คุณสุดา หาเก่ง (จัดซื้อ)', 'PURCHASING', 'purchaser@happymart.co.th', '089-666-7777', 'เจ้าหน้าที่จัดซื้อ', 'active'),
-('emp_acc1', 'EMP-007', 'accountant', '123456', 'คุณปรียา คิดเป๊ะ (บัญชี)', 'ACCOUNTING', 'accountant@happymart.co.th', '089-777-8888', 'สมุห์บัญชี', 'active');
+('emp_owner', 'EMP-001', 'owner', 'supermarket_salt_2026:6701a36adb68a8de5bfc24e201bb3fa1b2eaa6e22e520e1d7cdcee726136ae71', 'คุณวิทูรย์ ลาเต้ (เจ้าของร้าน)', 'OWNER_ADMIN', 'owner@happymart.co.th', '089-111-2222', 'เจ้าของกิจการ / CEO', 'active'),
+('emp_manager', 'EMP-002', 'manager', 'supermarket_salt_2026:6701a36adb68a8de5bfc24e201bb3fa1b2eaa6e22e520e1d7cdcee726136ae71', 'คุณสมชาย บริหารดี (ผู้จัดการ)', 'MANAGER', 'manager@happymart.co.th', '089-222-3333', 'ผู้จัดการร้าน', 'active'),
+('emp_cashier1', 'EMP-003', 'cashier', 'supermarket_salt_2026:6701a36adb68a8de5bfc24e201bb3fa1b2eaa6e22e520e1d7cdcee726136ae71', 'คุณนภา ขายคล่อง (แคชเชียร์ 1)', 'CASHIER', 'cashier1@happymart.co.th', '089-333-4444', 'พนักงานแคชเชียร์', 'active'),
+('emp_checker1', 'EMP-004', 'checker', 'supermarket_salt_2026:6701a36adb68a8de5bfc24e201bb3fa1b2eaa6e22e520e1d7cdcee726136ae71', 'คุณธีระ นับตรง (ตรวจนับ)', 'STOCK_CHECKER', 'checker@happymart.co.th', '089-444-5555', 'พนักงานตรวจสต๊อก', 'active'),
+('emp_wh1', 'EMP-005', 'warehouse', 'supermarket_salt_2026:6701a36adb68a8de5bfc24e201bb3fa1b2eaa6e22e520e1d7cdcee726136ae71', 'คุณมนัส จัดคลัง (พนักงานคลัง)', 'WAREHOUSE', 'warehouse@happymart.co.th', '089-555-6666', 'หัวหน้าคลังสินค้า', 'active'),
+('emp_pur1', 'EMP-006', 'purchaser', 'supermarket_salt_2026:6701a36adb68a8de5bfc24e201bb3fa1b2eaa6e22e520e1d7cdcee726136ae71', 'คุณสุดา หาเก่ง (จัดซื้อ)', 'PURCHASING', 'purchaser@happymart.co.th', '089-666-7777', 'เจ้าหน้าที่จัดซื้อ', 'active'),
+('emp_acc1', 'EMP-007', 'accountant', 'supermarket_salt_2026:6701a36adb68a8de5bfc24e201bb3fa1b2eaa6e22e520e1d7cdcee726136ae71', 'คุณปรียา คิดเป๊ะ (บัญชี)', 'ACCOUNTING', 'accountant@happymart.co.th', '089-777-8888', 'สมุห์บัญชี', 'active');
 
 -- Warehouses & Internal Storage Locations
 INSERT OR REPLACE INTO warehouses (id, code, name, type) VALUES

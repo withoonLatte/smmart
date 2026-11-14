@@ -3,16 +3,16 @@ import { useAuthStore } from "@/store/useAuthStore";
 const API_BASE = "/api";
 
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
-  const { currentUser } = useAuthStore.getState();
+  const { sessionToken } = useAuthStore.getState();
 
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     ...(options.headers as Record<string, string>),
   };
 
-  if (currentUser) {
-    headers["X-Role"] = currentUser.role_code;
-    headers["X-User-Id"] = currentUser.id;
+  // Attach verified Bearer Session Token
+  if (sessionToken) {
+    headers["Authorization"] = `Bearer ${sessionToken}`;
   }
 
   const res = await fetch(`${API_BASE}${path}`, {
@@ -20,7 +20,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
     headers,
   });
 
-  const json = await res.json();
+  const json = await res.json().catch(() => ({}));
   if (!res.ok) {
     throw new Error(json.error || `Error ${res.status}: ${res.statusText}`);
   }
@@ -30,10 +30,15 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 export const api = {
   // Auth
   login: (credentials: { username: string; password: string }) =>
-    request<{ success: boolean; user: any }>("/auth/login", {
+    request<{ success: boolean; token: string; user: any }>("/auth/login", {
       method: "POST",
       body: JSON.stringify(credentials),
     }),
+  logout: () =>
+    request<{ success: boolean; message: string }>("/auth/logout", {
+      method: "POST",
+    }),
+  getMe: () => request<{ success: boolean; user: any }>("/auth/me"),
 
   // Store Profile
   getStoreProfile: () => request<{ success: boolean; data: any }>("/store-profile"),
@@ -48,7 +53,7 @@ export const api = {
 
   // POS
   getActiveShift: (cashierId?: string) =>
-    request<{ success: boolean; shift: any }>(`/pos/shift/active${cashierId ? `?cashier_id=${cashierId}` : ""}`),
+    request<{ success: boolean; shift: any }>("/pos/shift/active"),
   openShift: (data: any) =>
     request<{ success: boolean; shift: any; message: string }>("/pos/shift/open", {
       method: "POST",
@@ -59,14 +64,14 @@ export const api = {
       method: "POST",
       body: JSON.stringify(data),
     }),
-  checkout: (data: any) =>
+  checkout: (data: any, idempotencyKey?: string) =>
     request<{ success: boolean; invoice_no: string; sale: any; items: any[]; message: string }>("/pos/checkout", {
       method: "POST",
+      headers: idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {},
       body: JSON.stringify(data),
     }),
   getSales: () => request<{ success: boolean; data: any[] }>("/pos/sales"),
-  getSaleDetail: (id: string) => request<{ success: boolean; sale: any; items: any[] }>(`/pos/sales/${id}`),
-  voidSale: (id: string, data: { reason: string; approved_by: string }) =>
+  voidSale: (id: string, data: { reason: string }) =>
     request<{ success: boolean; message: string }>(`/pos/sales/${id}/void`, {
       method: "POST",
       body: JSON.stringify(data),
@@ -119,10 +124,10 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ counts }),
     }),
-  approveStockCount: (id: string, approvedBy: string) =>
+  approveStockCount: (id: string) =>
     request<{ success: boolean; message: string }>(`/stock-count/tasks/${id}/approve`, {
       method: "POST",
-      body: JSON.stringify({ approved_by: approvedBy }),
+      body: JSON.stringify({}),
     }),
 
   // Suppliers & Purchasing
@@ -138,10 +143,10 @@ export const api = {
       method: "POST",
       body: JSON.stringify(data),
     }),
-  approvePurchaseOrder: (id: string, userId: string) =>
+  approvePurchaseOrder: (id: string) =>
     request<{ success: boolean; message: string }>(`/purchasing/orders/${id}/approve`, {
       method: "POST",
-      body: JSON.stringify({ user_id: userId }),
+      body: JSON.stringify({}),
     }),
   receivePurchaseOrder: (id: string, data: any) =>
     request<{ success: boolean; message: string }>(`/purchasing/orders/${id}/receive`, {
@@ -186,6 +191,9 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ permissions }),
     }),
+
+  // Audit Logs
+  getAuditLogs: () => request<{ success: boolean; data: any[] }>("/audit-logs"),
 
   // Notifications
   getNotifications: () => request<{ success: boolean; data: any[] }>("/notifications"),

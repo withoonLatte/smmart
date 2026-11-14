@@ -8,29 +8,180 @@ type Bindings = {
   DB: D1Database;
 };
 
-const app = new Hono<{ Bindings: Bindings }>().basePath("/api");
+// User type attached to context after verified session authentication
+export interface AuthUser {
+  id: string;
+  employee_code: string;
+  username: string;
+  full_name: string;
+  role_code: string;
+  position: string;
+  permissions: string[];
+}
 
+type Variables = {
+  user?: AuthUser;
+};
+
+const app = new Hono<{ Bindings: Bindings; Variables: Variables }>().basePath("/api");
+
+// Enable CORS
 app.use("*", cors({
   origin: "*",
   allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-  allowHeaders: ["Content-Type", "Authorization", "X-Role", "X-User-Id"],
+  allowHeaders: ["Content-Type", "Authorization", "Idempotency-Key"],
 }));
 
-// Helper: generate IDs
+// Helper: ID generator
 function genId(prefix: string) {
-  return `${prefix}_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+  return `${prefix}_${Date.now()}_${crypto.randomUUID().substring(0, 8)}`;
 }
 
 // -------------------------------------------------------------------
-// 1. AUTHENTICATION & SESSIONS
+// CRYPTOGRAPHIC PASSWORD HASHING (PBKDF2-SHA256 with Unique Salt)
+// -------------------------------------------------------------------
+async function hashPassword(password: string, salt?: string): Promise<string> {
+  const enc = new TextEncoder();
+  const saltStr = salt || Array.from(crypto.getRandomValues(new Uint8Array(16))).map(b => b.toString(16).padStart(2, '0')).join('');
+  const keyMaterial = await crypto.subtle.importKey(
+    'raw',
+    enc.encode(password),
+    { name: 'PBKDF2' },
+    false,
+    ['deriveBits']
+  );
+  const derivedBits = await crypto.subtle.deriveBits(
+    {
+      name: 'PBKDF2',
+      salt: enc.encode(saltStr),
+      iterations: 10000,
+      hash: 'SHA-256'
+    },
+    keyMaterial,
+    256
+  );
+  const hashHex = Array.from(new Uint8Array(derivedBits)).map(b => b.toString(16).padStart(2, '0')).join('');
+  return `${saltStr}:${hashHex}`;
+}
+
+async function verifyPassword(password: string, storedHash: string): Promise<boolean> {
+  if (!storedHash) return false;
+  const parts = storedHash.split(':');
+  if (parts.length !== 2) return false;
+  const [salt] = parts;
+  const computed = await hashPassword(password, salt);
+  return computed === storedHash;
+}
+
+function generateSessionToken(): string {
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+// -------------------------------------------------------------------
+// AUTHENTICATION & PERMISSION MIDDLEWARE (ZERO TRUST RBAC)
+// -------------------------------------------------------------------
+async function authMiddleware(c: any, next: any) {
+  const authHeader = c.req.header("Authorization");
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    return c.json({ success: false, error: "กรุณาเข้าสู่ระบบก่อนเข้าถึงข้อมูล (Unauthorized: Missing Bearer Token)" }, 401);
+  }
+
+  const token = authHeader.substring(7).trim();
+  const db = c.env.DB;
+
+  const session: any = await db.prepare(
+    `SELECT s.*, e.employee_code, e.username, e.full_name, e.role_code as emp_role, e.position, e.status
+     FROM user_sessions s
+     JOIN employees e ON e.id = s.user_id
+     WHERE s.token = ? AND s.expires_at > datetime('now', 'localtime')`
+  ).bind(token).first();
+
+  if (!session) {
+    return c.json({ success: false, error: "Session หมดอายุหรือไม่ถูกต้อง กรุณาเข้าสู่ระบบใหม่" }, 401);
+  }
+
+  if (session.status === "suspended") {
+    // Revoke suspended session
+    await db.prepare("DELETE FROM user_sessions WHERE id = ?").bind(session.id).run();
+    return c.json({ success: false, error: "บัญชีของคุณถูกระงับการใช้งาน กรุณาติดต่อผู้ดูแลระบบ" }, 403);
+  }
+
+  // Load real permissions from database for this verified role
+  const permRes = await db.prepare(
+    `SELECT rp.permission_code 
+     FROM role_permissions rp
+     JOIN roles r ON r.id = rp.role_id
+     WHERE r.code = ?`
+  ).bind(session.emp_role).all();
+
+  const perms = permRes.results.map((p: any) => p.permission_code);
+  if (session.emp_role === "OWNER_ADMIN") {
+    perms.push("*");
+  }
+
+  const user: AuthUser = {
+    id: session.user_id,
+    employee_code: session.employee_code,
+    username: session.username,
+    full_name: session.full_name,
+    role_code: session.emp_role,
+    position: session.position,
+    permissions: perms,
+  };
+
+  c.set("user", user);
+  await next();
+}
+
+function requirePermission(permissionCode: string) {
+  return async (c: any, next: any) => {
+    const user: AuthUser | undefined = c.get("user");
+    if (!user) {
+      return c.json({ success: false, error: "Unauthorized" }, 401);
+    }
+
+    const hasPerm =
+      user.role_code === "OWNER_ADMIN" ||
+      user.permissions.includes("*") ||
+      user.permissions.includes(permissionCode);
+
+    if (!hasPerm) {
+      return c.json({
+        success: false,
+        error: `ปฏิเสธการเข้าถึง: บัญชีของคุณไม่มีสิทธิ์ดำเนินการในส่วนนี้ (${permissionCode})`,
+      }, 403);
+    }
+
+    await next();
+  };
+}
+
+function requireOwnerOnly() {
+  return async (c: any, next: any) => {
+    const user: AuthUser | undefined = c.get("user");
+    if (!user || user.role_code !== "OWNER_ADMIN") {
+      return c.json({ success: false, error: "สงวนสิทธิ์เฉพาะเจ้าของระบบสูงสุด (OWNER_ADMIN) เท่านั้น" }, 403);
+    }
+    await next();
+  };
+}
+
+// -------------------------------------------------------------------
+// 1. AUTHENTICATION ENDPOINTS
 // -------------------------------------------------------------------
 app.post("/auth/login", async (c) => {
   const { username, password } = await c.req.json();
   const db = c.env.DB;
 
+  if (!username || !password) {
+    return c.json({ success: false, error: "กรุณาระบุชื่อผู้ใช้และรหัสผ่าน" }, 400);
+  }
+
   const emp: any = await db.prepare(
-    "SELECT * FROM employees WHERE username = ? AND password_hash = ?"
-  ).bind(username, password).first();
+    "SELECT * FROM employees WHERE username = ?"
+  ).bind(username).first();
 
   if (!emp) {
     return c.json({ success: false, error: "ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง" }, 401);
@@ -40,10 +191,34 @@ app.post("/auth/login", async (c) => {
     return c.json({ success: false, error: "บัญชีนี้ถูกระงับการใช้งาน กรุณาติดต่อผู้ดูแลระบบ" }, 403);
   }
 
+  // Cryptographic hash check
+  const isMatch = await verifyPassword(password, emp.password_hash);
+  if (!isMatch) {
+    return c.json({ success: false, error: "ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง" }, 401);
+  }
+
+  // Generate cryptographically secure token & session record
+  const token = generateSessionToken();
+  const sessionId = genId("sess");
+  const ip = c.req.header("CF-Connecting-IP") || c.req.header("X-Forwarded-For") || "unknown";
+  const userAgent = c.req.header("User-Agent") || "";
+
+  // 7-day session expiration
+  await db.prepare(
+    `INSERT INTO user_sessions (id, user_id, token, role_code, ip_address, user_agent, expires_at)
+     VALUES (?, ?, ?, ?, ?, ?, datetime('now', '+7 days'))`
+  ).bind(sessionId, emp.id, token, emp.role_code, ip, userAgent).run();
+
   // Update last login
   await db.prepare("UPDATE employees SET last_login_at = datetime('now', 'localtime') WHERE id = ?").bind(emp.id).run();
 
-  // Fetch permissions for this role
+  // Audit log
+  await db.prepare(
+    `INSERT INTO audit_logs (id, user_id, user_name, action, module, record_id, details, ip_address)
+     VALUES (?, ?, ?, 'AUTH_LOGIN', 'AUTH', ?, 'เข้าสู่ระบบสำเร็จ', ?)`
+  ).bind(genId("aud"), emp.id, emp.full_name, emp.id, ip).run();
+
+  // Fetch verified permissions
   const perms = await db.prepare(
     `SELECT permission_code FROM role_permissions rp 
      JOIN roles r ON r.id = rp.role_id 
@@ -51,9 +226,13 @@ app.post("/auth/login", async (c) => {
   ).bind(emp.role_code).all();
 
   const permissionList = perms.results.map((p: any) => p.permission_code);
+  if (emp.role_code === "OWNER_ADMIN") {
+    permissionList.push("*");
+  }
 
   return c.json({
     success: true,
+    token,
     user: {
       id: emp.id,
       employee_code: emp.employee_code,
@@ -68,6 +247,27 @@ app.post("/auth/login", async (c) => {
   });
 });
 
+app.post("/auth/logout", authMiddleware, async (c) => {
+  const authHeader = c.req.header("Authorization")!;
+  const token = authHeader.substring(7).trim();
+  const db = c.env.DB;
+  const user = c.get("user")!;
+
+  await db.prepare("DELETE FROM user_sessions WHERE token = ?").bind(token).run();
+
+  await db.prepare(
+    `INSERT INTO audit_logs (id, user_id, user_name, action, module, record_id, details)
+     VALUES (?, ?, ?, 'AUTH_LOGOUT', 'AUTH', ?, 'ออกจากระบบ')`
+  ).bind(genId("aud"), user.id, user.full_name, user.id).run();
+
+  return c.json({ success: true, message: "ออกจากระบบเรียบร้อยแล้ว" });
+});
+
+app.get("/auth/me", authMiddleware, async (c) => {
+  const user = c.get("user")!;
+  return c.json({ success: true, user });
+});
+
 // -------------------------------------------------------------------
 // 2. STORE PROFILE & SYSTEM SETTINGS
 // -------------------------------------------------------------------
@@ -77,9 +277,10 @@ app.get("/store-profile", async (c) => {
   return c.json({ success: true, data: store });
 });
 
-app.put("/store-profile", async (c) => {
+app.put("/store-profile", authMiddleware, requirePermission("settings.manage"), async (c) => {
   const body = await c.req.json();
   const db = c.env.DB;
+  const user = c.get("user")!;
 
   await db.prepare(
     `UPDATE store_profile SET 
@@ -93,20 +294,21 @@ app.put("/store-profile", async (c) => {
     body.id || 'store_001'
   ).run();
 
-  return c.json({ success: true, message: "บันทึกข้อมูลร้านค้าเรียบร้อยแล้ว" });
-});
+  await db.prepare(
+    `INSERT INTO audit_logs (id, user_id, user_name, action, module, record_id, details)
+     VALUES (?, ?, ?, 'STORE_PROFILE_UPDATE', 'SETTINGS', ?, 'แก้ไขข้อมูลร้านค้าและใบเสร็จ')`
+  ).bind(genId("aud"), user.id, user.full_name, body.id || 'store_001').run();
 
-app.get("/settings", async (c) => {
-  const db = c.env.DB;
-  const settings = await db.prepare("SELECT * FROM system_settings").all();
-  return c.json({ success: true, data: settings.results });
+  return c.json({ success: true, message: "บันทึกข้อมูลร้านค้าเรียบร้อยแล้ว" });
 });
 
 // -------------------------------------------------------------------
 // 3. OWNER DASHBOARD
 // -------------------------------------------------------------------
-app.get("/dashboard/summary", async (c) => {
+app.get("/dashboard/summary", authMiddleware, requirePermission("dashboard.view"), async (c) => {
   const db = c.env.DB;
+  const user = c.get("user")!;
+  const canSeeFinancial = user.role_code === "OWNER_ADMIN" || user.permissions.includes("dashboard.financial");
 
   // Today Sales
   const todaySales: any = await db.prepare(
@@ -126,15 +328,23 @@ app.get("/dashboard/summary", async (c) => {
      WHERE strftime('%Y-%m', created_at) = strftime('%Y-%m', 'now', 'localtime') AND status = 'completed'`
   ).first();
 
-  // Gross profit estimate (Sales subtotal - total costs)
-  const profitEst: any = await db.prepare(
-    `SELECT 
-      COALESCE(SUM(si.subtotal), 0) as total_revenue,
-      COALESCE(SUM(si.cost_price * si.quantity), 0) as total_cost
-     FROM sale_items si
-     JOIN sales s ON s.id = si.sale_id
-     WHERE s.status = 'completed'`
-  ).first();
+  // Gross profit
+  let profitData = { revenue: 0, cost: 0, gross_profit: 0 };
+  if (canSeeFinancial) {
+    const profitEst: any = await db.prepare(
+      `SELECT 
+        COALESCE(SUM(si.subtotal), 0) as total_revenue,
+        COALESCE(SUM(si.cost_price * si.quantity), 0) as total_cost
+       FROM sale_items si
+       JOIN sales s ON s.id = si.sale_id
+       WHERE s.status = 'completed'`
+    ).first();
+    profitData = {
+      revenue: profitEst?.total_revenue || 0,
+      cost: profitEst?.total_cost || 0,
+      gross_profit: (profitEst?.total_revenue || 0) - (profitEst?.total_cost || 0),
+    };
+  }
 
   // Inventory valuation
   const inventoryVal: any = await db.prepare(
@@ -167,7 +377,7 @@ app.get("/dashboard/summary", async (c) => {
      ORDER BY sold_qty DESC LIMIT 5`
   ).all();
 
-  // Recent 5 sales
+  // Recent 6 sales
   const recentSales = await db.prepare(
     `SELECT s.*, e.full_name as cashier_name 
      FROM sales s 
@@ -193,13 +403,9 @@ app.get("/dashboard/summary", async (c) => {
         sales: monthSales?.month_sales || 0,
         transactions: monthSales?.month_transactions || 0,
       },
-      profit: {
-        revenue: profitEst?.total_revenue || 0,
-        cost: profitEst?.total_cost || 0,
-        gross_profit: (profitEst?.total_revenue || 0) - (profitEst?.total_cost || 0),
-      },
+      profit: profitData,
       inventory: {
-        cost_value: inventoryVal?.total_cost_value || 0,
+        cost_value: canSeeFinancial ? (inventoryVal?.total_cost_value || 0) : 0,
         retail_value: inventoryVal?.total_retail_value || 0,
         total_items: inventoryVal?.total_stock_items || 0,
       },
@@ -212,19 +418,21 @@ app.get("/dashboard/summary", async (c) => {
 });
 
 // -------------------------------------------------------------------
-// 4. POS (POINT OF SALE)
+// 4. POS (POINT OF SALE) - ATOMIC CHECKOUT & SERVER VERIFICATION
 // -------------------------------------------------------------------
 
-// Check Active Shift for Cashier
-app.get("/pos/shift/active", async (c) => {
-  const cashierId = c.req.query("cashier_id");
+// Check Active Shift
+app.get("/pos/shift/active", authMiddleware, requirePermission("pos.access"), async (c) => {
+  const user = c.get("user")!;
   const db = c.env.DB;
 
   let query = "SELECT * FROM cashier_shifts WHERE status = 'open'";
   let params: any[] = [];
-  if (cashierId) {
+
+  // Cashier only sees own active shift; Manager/Owner can see any
+  if (user.role_code === "CASHIER") {
     query += " AND cashier_id = ?";
-    params.push(cashierId);
+    params.push(user.id);
   }
   query += " ORDER BY opened_at DESC LIMIT 1";
 
@@ -233,14 +441,15 @@ app.get("/pos/shift/active", async (c) => {
 });
 
 // Open Shift
-app.post("/pos/shift/open", async (c) => {
-  const { cashier_id, cashier_name, opening_cash, notes } = await c.req.json();
+app.post("/pos/shift/open", authMiddleware, requirePermission("pos.shift"), async (c) => {
+  const { opening_cash, notes } = await c.req.json();
   const db = c.env.DB;
+  const user = c.get("user")!;
 
-  // Check if already open
+  // Check if cashier already has an open shift
   const existing = await db.prepare(
     "SELECT id FROM cashier_shifts WHERE cashier_id = ? AND status = 'open'"
-  ).bind(cashier_id).first();
+  ).bind(user.id).first();
 
   if (existing) {
     return c.json({ success: false, error: "คุณมีกะการทำงานที่ยังเปิดค้างอยู่แล้ว" }, 400);
@@ -249,38 +458,60 @@ app.post("/pos/shift/open", async (c) => {
   const shiftId = genId("shift");
   const shiftCode = `SFT-${new Date().toISOString().slice(2, 10).replace(/-/g, '')}-${Math.floor(1000 + Math.random() * 9000)}`;
 
-  await db.prepare(
-    `INSERT INTO cashier_shifts (id, shift_code, cashier_id, cashier_name, opening_cash, expected_cash, notes)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`
-  ).bind(shiftId, shiftCode, cashier_id, cashier_name, Number(opening_cash) || 0, Number(opening_cash) || 0, notes || '').run();
+  const batch = [
+    db.prepare(
+      `INSERT INTO cashier_shifts (id, shift_code, cashier_id, cashier_name, opening_cash, expected_cash, notes)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    ).bind(shiftId, shiftCode, user.id, user.full_name, Number(opening_cash) || 0, Number(opening_cash) || 0, notes || ''),
+    db.prepare(
+      `INSERT INTO audit_logs (id, user_id, user_name, action, module, record_id, details)
+       VALUES (?, ?, ?, 'SHIFT_OPEN', 'POS', ?, ?)`
+    ).bind(genId("aud"), user.id, user.full_name, shiftId, `เปิดกะขาย รหัส ${shiftCode} เงินทอน ${opening_cash} บาท`)
+  ];
+
+  await db.batch(batch);
 
   const newShift = await db.prepare("SELECT * FROM cashier_shifts WHERE id = ?").bind(shiftId).first();
   return c.json({ success: true, shift: newShift, message: "เปิดกะขายเรียบร้อยแล้ว พร้อมให้บริการ" });
 });
 
 // Close Shift
-app.post("/pos/shift/close", async (c) => {
+app.post("/pos/shift/close", authMiddleware, requirePermission("pos.shift"), async (c) => {
   const { shift_id, actual_cash, notes } = await c.req.json();
   const db = c.env.DB;
+  const user = c.get("user")!;
 
   const shift: any = await db.prepare("SELECT * FROM cashier_shifts WHERE id = ?").bind(shift_id).first();
   if (!shift) {
     return c.json({ success: false, error: "ไม่พบข้อมูลกะนี้" }, 404);
   }
 
+  // Prevent closing someone else's shift unless manager/owner
+  if (shift.cashier_id !== user.id && user.role_code !== "OWNER_ADMIN" && user.role_code !== "MANAGER") {
+    return c.json({ success: false, error: "คุณไม่มีสิทธิ์ปิดกะของพนักงานท่านอื่น" }, 403);
+  }
+
   const expectedCash = (Number(shift.opening_cash) || 0) + (Number(shift.cash_sales) || 0) + (Number(shift.cash_in) || 0) - (Number(shift.cash_out) || 0);
   const diff = Number(actual_cash) - expectedCash;
 
-  await db.prepare(
-    `UPDATE cashier_shifts SET 
-      closed_at = datetime('now', 'localtime'),
-      expected_cash = ?,
-      actual_cash = ?,
-      difference = ?,
-      status = 'closed',
-      notes = ?
-     WHERE id = ?`
-  ).bind(expectedCash, Number(actual_cash), diff, notes || '', shift_id).run();
+  const batch = [
+    db.prepare(
+      `UPDATE cashier_shifts SET 
+        closed_at = datetime('now', 'localtime'),
+        expected_cash = ?,
+        actual_cash = ?,
+        difference = ?,
+        status = 'closed',
+        notes = ?
+       WHERE id = ?`
+    ).bind(expectedCash, Number(actual_cash), diff, notes || '', shift_id),
+    db.prepare(
+      `INSERT INTO audit_logs (id, user_id, user_name, action, module, record_id, details)
+       VALUES (?, ?, ?, 'SHIFT_CLOSE', 'POS', ?, ?)`
+    ).bind(genId("aud"), user.id, user.full_name, shift_id, `ปิดกะขาย เงินจริง ${actual_cash} ผลต่าง ${diff} บาท`)
+  ];
+
+  await db.batch(batch);
 
   return c.json({
     success: true,
@@ -296,85 +527,173 @@ app.post("/pos/shift/close", async (c) => {
   });
 });
 
-// POS Checkout
-app.post("/pos/checkout", async (c) => {
-  const {
-    shift_id,
-    cashier_id,
-    customer_id,
-    customer_name,
-    items, // array of { product_id, name, barcode, unit, quantity, unit_price, cost_price, discount_amount, subtotal }
-    subtotal,
-    discount_amount,
-    vat_amount,
-    grand_total,
-    payment_method, // cash, promptpay, card, transfer
-    received_amount,
-    change_amount
-  } = await c.req.json();
+// ATOMIC CHECKOUT WITH IDEMPOTENCY KEY & SERVER PRICE RE-VERIFICATION
+app.post("/pos/checkout", authMiddleware, requirePermission("pos.checkout"), async (c) => {
+  const user = c.get("user")!;
+  const db = c.env.DB;
+  const body = await c.req.json();
+  const idempotencyKey = c.req.header("Idempotency-Key") || body.idempotency_key;
 
-  if (!items || items.length === 0) {
-    return c.json({ success: false, error: "ตะกร้าสินค้าว่างเปล่า" }, 400);
+  // 1. Check Idempotency Key to prevent duplicate charges
+  if (idempotencyKey) {
+    const existingKey: any = await db.prepare(
+      "SELECT response_body FROM idempotency_keys WHERE key = ?"
+    ).bind(idempotencyKey).first();
+
+    if (existingKey) {
+      return c.json(JSON.parse(existingKey.response_body));
+    }
   }
 
-  const db = c.env.DB;
+  const {
+    shift_id,
+    customer_id,
+    items, // array of { product_id, quantity }
+    payment_method, // cash, promptpay, card, transfer
+    received_amount,
+  } = body;
+
+  if (!items || !Array.isArray(items) || items.length === 0) {
+    return c.json({ success: false, error: "ตะกร้าสินค้าว่างเปล่า กรุณาสแกนสินค้าก่อนชำระเงิน" }, 400);
+  }
+
+  // 2. Server-side validation of products, prices, and stock
+  let verifiedSubtotal = 0;
+  const verifiedItems: any[] = [];
+  const batchStatements: any[] = [];
+
+  for (const it of items) {
+    const qty = Number(it.quantity);
+    if (!qty || qty <= 0) {
+      return c.json({ success: false, error: `จำนวนสินค้าไม่ถูกต้อง (${qty})` }, 400);
+    }
+
+    // Query real product from server database
+    const product: any = await db.prepare(
+      "SELECT id, sku, barcode, name, unit, cost_price, selling_price, is_active FROM products WHERE id = ?"
+    ).bind(it.product_id).first();
+
+    if (!product || product.is_active === 0) {
+      return c.json({ success: false, error: `สินค้าไม่พบในระบบหรือถูกปิดใช้งาน (ID: ${it.product_id})` }, 400);
+    }
+
+    // Check shelf inventory: DO NOT ALLOW OVERSELL!
+    const shelfInv: any = await db.prepare(
+      "SELECT quantity FROM inventory WHERE product_id = ? AND location_id = 'loc_shelf'"
+    ).bind(product.id).first();
+
+    const currentShelfStock = shelfInv?.quantity || 0;
+    if (currentShelfStock < qty) {
+      return c.json({
+        success: false,
+        error: `สต๊อกสินค้าหน้าร้านไม่เพียงพอ: "${product.name}" มีอยู่ ${currentShelfStock} ${product.unit} (ต้องการขาย ${qty} ${product.unit})`,
+      }, 400);
+    }
+
+    const itemSubtotal = product.selling_price * qty;
+    verifiedSubtotal += itemSubtotal;
+
+    verifiedItems.push({
+      product_id: product.id,
+      name: product.name,
+      barcode: product.barcode,
+      unit: product.unit,
+      quantity: qty,
+      unit_price: product.selling_price,
+      cost_price: product.cost_price || 0,
+      subtotal: itemSubtotal,
+    });
+  }
+
+  // 3. Customer Discount calculation on server
+  let verifiedDiscount = 0;
+  let customerName = "ลูกค้าทั่วไป";
+  if (customer_id) {
+    const cust: any = await db.prepare(
+      "SELECT id, name, discount_pct, points FROM customers WHERE id = ? AND is_active = 1"
+    ).bind(customer_id).first();
+
+    if (cust) {
+      customerName = cust.name;
+      verifiedDiscount = (verifiedSubtotal * (Number(cust.discount_pct) || 0)) / 100;
+    }
+  }
+
+  const verifiedGrandTotal = Math.max(0, verifiedSubtotal - verifiedDiscount);
+  const vatRate = 7.0;
+  const verifiedVat = (verifiedGrandTotal * vatRate) / (100 + vatRate);
+
+  const numReceived = Number(received_amount) || verifiedGrandTotal;
+  if (payment_method === "cash" && numReceived < verifiedGrandTotal) {
+    return c.json({ success: false, error: "ยอดเงินสดที่รับมาไม่เพียงพอกับยอดที่ต้องชำระ" }, 400);
+  }
+  const changeAmount = payment_method === "cash" ? Math.max(0, numReceived - verifiedGrandTotal) : 0;
+
   const saleId = genId("sale");
   const invoiceNo = `INV-${new Date().toISOString().slice(2, 10).replace(/-/g, '')}-${Math.floor(10000 + Math.random() * 90000)}`;
 
-  // 1. Insert into sales
-  await db.prepare(
-    `INSERT INTO sales (
-      id, invoice_no, shift_id, cashier_id, customer_id, customer_name,
-      subtotal, discount_amount, vat_amount, grand_total, payment_method,
-      received_amount, change_amount, status
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'completed')`
-  ).bind(
-    saleId, invoiceNo, shift_id || null, cashier_id, customer_id || null, customer_name || 'ลูกค้าทั่วไป',
-    Number(subtotal), Number(discount_amount) || 0, Number(vat_amount) || 0, Number(grand_total),
-    payment_method, Number(received_amount), Number(change_amount) || 0
-  ).run();
-
-  // 2. Insert items and deduct stock atomically from retail shelves (loc_shelf)
-  for (const item of items) {
-    const saleItemId = genId("item");
-    await db.prepare(
-      `INSERT INTO sale_items (
-        id, sale_id, product_id, product_name, barcode, unit, quantity,
-        unit_price, cost_price, discount_amount, subtotal
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  // 4. Assemble atomic batch execution
+  // A. Insert Sale
+  batchStatements.push(
+    db.prepare(
+      `INSERT INTO sales (
+        id, invoice_no, shift_id, cashier_id, customer_id, customer_name,
+        subtotal, discount_amount, vat_amount, grand_total, payment_method,
+        received_amount, change_amount, status
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'completed')`
     ).bind(
-      saleItemId, saleId, item.product_id, item.name, item.barcode || '', item.unit || 'ชิ้น',
-      Number(item.quantity), Number(item.unit_price), Number(item.cost_price) || 0,
-      Number(item.discount_amount) || 0, Number(item.subtotal)
-    ).run();
+      saleId, invoiceNo, shift_id || null, user.id, customer_id || null, customerName,
+      verifiedSubtotal, verifiedDiscount, verifiedVat, verifiedGrandTotal,
+      payment_method, numReceived, changeAmount
+    )
+  );
 
-    // Deduct inventory from loc_shelf (or any location holding the product)
-    await db.prepare(
-      `UPDATE inventory SET 
-        quantity = MAX(0, quantity - ?),
-        updated_at = datetime('now', 'localtime')
-       WHERE product_id = ? AND location_id = 'loc_shelf'`
-    ).bind(Number(item.quantity), item.product_id).run();
+  // B. Insert Sale Items, deduct inventory, and record movements
+  for (const item of verifiedItems) {
+    const itemId = genId("item");
+    batchStatements.push(
+      db.prepare(
+        `INSERT INTO sale_items (
+          id, sale_id, product_id, product_name, barcode, unit, quantity,
+          unit_price, cost_price, discount_amount, subtotal
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`
+      ).bind(
+        itemId, saleId, item.product_id, item.name, item.barcode, item.unit,
+        item.quantity, item.unit_price, item.cost_price, item.subtotal
+      )
+    );
 
-    // Record stock movement
-    await db.prepare(
-      `INSERT INTO inventory_movements (
-        id, product_id, from_location_id, to_location_id, movement_type,
-        quantity, unit_cost, reference_type, reference_id, reason, created_by
-      ) VALUES (?, ?, 'loc_shelf', NULL, 'sale', ?, ?, 'sale', ?, 'จำหน่ายหน้าร้าน POS', ?)`
-    ).bind(
-      genId("mov"), item.product_id, Number(item.quantity), Number(item.cost_price) || 0,
-      invoiceNo, cashier_id
-    ).run();
+    // Atomic Inventory deduction (strictly checked > qty beforehand)
+    batchStatements.push(
+      db.prepare(
+        `UPDATE inventory SET 
+          quantity = quantity - ?,
+          updated_at = datetime('now', 'localtime')
+         WHERE product_id = ? AND location_id = 'loc_shelf'`
+      ).bind(item.quantity, item.product_id)
+    );
+
+    // Record movement
+    batchStatements.push(
+      db.prepare(
+        `INSERT INTO inventory_movements (
+          id, product_id, from_location_id, to_location_id, movement_type,
+          quantity, unit_cost, reference_type, reference_id, reason, created_by
+        ) VALUES (?, ?, 'loc_shelf', NULL, 'sale', ?, ?, 'sale', ?, 'จำหน่ายหน้าร้าน POS', ?)`
+      ).bind(
+        genId("mov"), item.product_id, item.quantity, item.cost_price,
+        invoiceNo, user.full_name
+      )
+    );
   }
 
-  // 3. Update shift sales if shift_id provided
+  // C. Update Shift Drawer if shift_id provided
   if (shift_id) {
     let updateField = "total_sales = total_sales + ?, expected_cash = expected_cash + ?";
     let extraCash = 0;
     if (payment_method === "cash") {
       updateField += ", cash_sales = cash_sales + ?";
-      extraCash = Number(grand_total);
+      extraCash = verifiedGrandTotal;
     } else if (payment_method === "promptpay") {
       updateField += ", promptpay_sales = promptpay_sales + ?";
     } else if (payment_method === "card") {
@@ -384,55 +703,91 @@ app.post("/pos/checkout", async (c) => {
     }
 
     if (payment_method === "cash") {
-      await db.prepare(
-        `UPDATE cashier_shifts SET ${updateField} WHERE id = ?`
-      ).bind(Number(grand_total), extraCash, Number(grand_total), shift_id).run();
+      batchStatements.push(
+        db.prepare(`UPDATE cashier_shifts SET ${updateField} WHERE id = ?`)
+          .bind(verifiedGrandTotal, extraCash, verifiedGrandTotal, shift_id)
+      );
     } else {
-      await db.prepare(
-        `UPDATE cashier_shifts SET ${updateField} WHERE id = ?`
-      ).bind(Number(grand_total), 0, Number(grand_total), shift_id).run();
+      batchStatements.push(
+        db.prepare(`UPDATE cashier_shifts SET ${updateField} WHERE id = ?`)
+          .bind(verifiedGrandTotal, 0, verifiedGrandTotal, shift_id)
+      );
     }
   }
 
-  // 4. Update member points (1 point per 50 THB)
+  // D. Member Points Accumulation (1 pt per 50 THB)
   if (customer_id) {
-    const earnedPoints = Math.floor(Number(grand_total) / 50);
-    await db.prepare(
-      `UPDATE customers SET 
-        points = points + ?,
-        total_spent = total_spent + ?
-       WHERE id = ?`
-    ).bind(earnedPoints, Number(grand_total), customer_id).run();
+    const earnedPoints = Math.floor(verifiedGrandTotal / 50);
+    batchStatements.push(
+      db.prepare(
+        `UPDATE customers SET points = points + ?, total_spent = total_spent + ? WHERE id = ?`
+      ).bind(earnedPoints, verifiedGrandTotal, customer_id)
+    );
   }
 
-  // Fetch full created sale with items
-  const createdSale = await db.prepare("SELECT * FROM sales WHERE id = ?").bind(saleId).first();
-  const createdItems = await db.prepare("SELECT * FROM sale_items WHERE sale_id = ?").bind(saleId).all();
+  // E. Audit log
+  batchStatements.push(
+    db.prepare(
+      `INSERT INTO audit_logs (id, user_id, user_name, action, module, record_id, details)
+       VALUES (?, ?, ?, 'POS_CHECKOUT', 'POS', ?, ?)`
+    ).bind(
+      genId("aud"), user.id, user.full_name, saleId,
+      `จำหน่ายสินค้า บิล ${invoiceNo} ยอด ฿${verifiedGrandTotal.toFixed(2)} ช่องทาง ${payment_method}`
+    )
+  );
 
-  return c.json({
+  const responsePayload = {
     success: true,
     invoice_no: invoiceNo,
-    sale: createdSale,
-    items: createdItems.results,
-    message: "บันทึกการขายสำเร็จเรียบร้อย"
-  });
+    sale: {
+      id: saleId,
+      invoice_no: invoiceNo,
+      shift_id,
+      cashier_id: user.id,
+      customer_id,
+      customer_name: customerName,
+      subtotal: verifiedSubtotal,
+      discount_amount: verifiedDiscount,
+      vat_amount: verifiedVat,
+      grand_total: verifiedGrandTotal,
+      payment_method,
+      received_amount: numReceived,
+      change_amount: changeAmount,
+      status: "completed",
+    },
+    items: verifiedItems,
+    message: "บันทึกการขายและตัดสต๊อกสำเร็จเรียบร้อย",
+  };
+
+  // F. Record Idempotency Key
+  if (idempotencyKey) {
+    batchStatements.push(
+      db.prepare(
+        "INSERT INTO idempotency_keys (key, user_id, response_body) VALUES (?, ?, ?)"
+      ).bind(idempotencyKey, user.id, JSON.stringify(responsePayload))
+    );
+  }
+
+  // EXECUTE ALL IN SINGLE ATOMIC TRANSACTION
+  await db.batch(batchStatements);
+
+  return c.json(responsePayload);
 });
 
-// Sales List (Role-filtered)
-app.get("/pos/sales", async (c) => {
+// Sales List (Strict role-based data filtering)
+app.get("/pos/sales", authMiddleware, requirePermission("pos.access"), async (c) => {
   const db = c.env.DB;
-  const cashierId = c.req.header("X-User-Id");
-  const role = c.req.header("X-Role");
+  const user = c.get("user")!;
 
   let query = `SELECT s.*, e.full_name as cashier_name 
                FROM sales s 
                LEFT JOIN employees e ON e.id = s.cashier_id `;
   let params: any[] = [];
 
-  // Cashiers can ONLY view their own sales
-  if (role === "CASHIER" && cashierId) {
+  // Cashiers can ONLY view their own sales!
+  if (user.role_code === "CASHIER") {
     query += " WHERE s.cashier_id = ? ";
-    params.push(cashierId);
+    params.push(user.id);
   }
 
   query += " ORDER BY s.created_at DESC LIMIT 100";
@@ -441,69 +796,64 @@ app.get("/pos/sales", async (c) => {
   return c.json({ success: true, data: sales.results });
 });
 
-// Sale Details
-app.get("/pos/sales/:id", async (c) => {
-  const db = c.env.DB;
-  const saleId = c.req.param("id");
-
-  const sale = await db.prepare("SELECT * FROM sales WHERE id = ?").bind(saleId).first();
-  if (!sale) {
-    return c.json({ success: false, error: "ไม่พบบิลการขาย" }, 404);
-  }
-
-  const items = await db.prepare("SELECT * FROM sale_items WHERE sale_id = ?").bind(saleId).all();
-  return c.json({ success: true, sale, items: items.results });
-});
-
 // Void / Refund Sale (Manager/Admin Approval Required)
-app.post("/pos/sales/:id/void", async (c) => {
+app.post("/pos/sales/:id/void", authMiddleware, requirePermission("pos.void_approve"), async (c) => {
   const saleId = c.req.param("id");
-  const { reason, approved_by } = await c.req.json();
+  const { reason } = await c.req.json();
   const db = c.env.DB;
+  const user = c.get("user")!;
 
   const sale: any = await db.prepare("SELECT * FROM sales WHERE id = ?").bind(saleId).first();
-  if (!sale) return c.json({ success: false, error: "ไม่พบการขาย" }, 404);
+  if (!sale) return c.json({ success: false, error: "ไม่พบบิลการขาย" }, 404);
   if (sale.status === "voided") return c.json({ success: false, error: "บิลนี้ถูกยกเลิกไปแล้ว" }, 400);
 
-  // Mark void
-  await db.prepare(
-    `UPDATE sales SET 
-      status = 'voided',
-      void_reason = ?,
-      void_approved_by = ?
-     WHERE id = ?`
-  ).bind(reason || 'ลูกค้ายกเลิก', approved_by || 'Manager', saleId).run();
-
-  // Restock items back to loc_shelf
   const items = await db.prepare("SELECT * FROM sale_items WHERE sale_id = ?").bind(saleId).all();
-  for (const item of items.results as any[]) {
-    await db.prepare(
-      `UPDATE inventory SET 
-        quantity = quantity + ?,
-        updated_at = datetime('now', 'localtime')
-       WHERE product_id = ? AND location_id = 'loc_shelf'`
-    ).bind(Number(item.quantity), item.product_id).run();
 
-    await db.prepare(
-      `INSERT INTO inventory_movements (
-        id, product_id, from_location_id, to_location_id, movement_type,
-        quantity, unit_cost, reference_type, reference_id, reason, created_by
-      ) VALUES (?, ?, NULL, 'loc_shelf', 'return', ?, ?, 'void', ?, ?, ?)`
-    ).bind(
-      genId("mov"), item.product_id, Number(item.quantity), Number(item.cost_price) || 0,
-      sale.invoice_no, reason || 'ยกเลิกบิลขาย คืนสต๊อก', approved_by
-    ).run();
+  const batch = [
+    db.prepare(
+      `UPDATE sales SET 
+        status = 'voided',
+        void_reason = ?,
+        void_approved_by = ?
+       WHERE id = ?`
+    ).bind(reason || 'ลูกค้ายกเลิก/คืนสินค้า', user.full_name, saleId),
+    db.prepare(
+      `INSERT INTO audit_logs (id, user_id, user_name, action, module, record_id, details)
+       VALUES (?, ?, ?, 'POS_VOID', 'POS', ?, ?)`
+    ).bind(genId("aud"), user.id, user.full_name, saleId, `ยกเลิกบิล ${sale.invoice_no} เหตุผล: ${reason}`)
+  ];
+
+  // Restock items back to loc_shelf atomically
+  for (const item of items.results as any[]) {
+    batch.push(
+      db.prepare(
+        `UPDATE inventory SET quantity = quantity + ?, updated_at = datetime('now', 'localtime')
+         WHERE product_id = ? AND location_id = 'loc_shelf'`
+      ).bind(Number(item.quantity), item.product_id)
+    );
+    batch.push(
+      db.prepare(
+        `INSERT INTO inventory_movements (
+          id, product_id, from_location_id, to_location_id, movement_type,
+          quantity, unit_cost, reference_type, reference_id, reason, created_by
+        ) VALUES (?, ?, NULL, 'loc_shelf', 'return', ?, ?, 'void', ?, ?, ?)`
+      ).bind(
+        genId("mov"), item.product_id, Number(item.quantity), Number(item.cost_price) || 0,
+        sale.invoice_no, reason || 'ยกเลิกบิล คืนสต๊อก', user.full_name
+      )
+    );
   }
 
+  await db.batch(batch);
   return c.json({ success: true, message: `ยกเลิกบิล ${sale.invoice_no} และคืนสต๊อกเข้าสู่ชั้นวางเรียบร้อยแล้ว` });
 });
 
 // -------------------------------------------------------------------
 // 5. PRODUCTS & CATALOG
 // -------------------------------------------------------------------
-app.get("/products", async (c) => {
+app.get("/products", authMiddleware, async (c) => {
   const db = c.env.DB;
-  const role = c.req.header("X-Role");
+  const user = c.get("user")!;
   const search = c.req.query("q") || "";
   const cat = c.req.query("cat") || "";
 
@@ -531,9 +881,10 @@ app.get("/products", async (c) => {
   query += " GROUP BY p.id ORDER BY p.name ASC";
   const prods = await db.prepare(query).bind(...params).all();
 
-  // Strip cost_price if user is CASHIER or STOCK_CHECKER (Least Privilege Rule)
+  // Strip cost_price if user has no cost permission
+  const canSeeCost = user.role_code === "OWNER_ADMIN" || user.permissions.includes("product.cost_view");
   const results = prods.results.map((p: any) => {
-    if (role === "CASHIER" || role === "STOCK_CHECKER") {
+    if (!canSeeCost) {
       const { cost_price, wholesale_price, ...safe } = p;
       return safe;
     }
@@ -543,62 +894,85 @@ app.get("/products", async (c) => {
   return c.json({ success: true, data: results });
 });
 
-app.post("/products", async (c) => {
+app.post("/products", authMiddleware, requirePermission("product.manage"), async (c) => {
   const body = await c.req.json();
   const db = c.env.DB;
+  const user = c.get("user")!;
   const prodId = genId("prod");
 
-  await db.prepare(
-    `INSERT INTO products (
-      id, sku, barcode, name, category_id, brand_id, unit,
-      cost_price, selling_price, wholesale_price, min_stock, max_stock,
-      is_vat, is_active, expiry_date, batch_number
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`
-  ).bind(
-    prodId, body.sku, body.barcode, body.name, body.category_id || null, body.brand_id || null,
-    body.unit || 'ชิ้น', Number(body.cost_price) || 0, Number(body.selling_price) || 0,
-    Number(body.wholesale_price) || 0, Number(body.min_stock) || 5, Number(body.max_stock) || 500,
-    body.is_vat ? 1 : 0, body.expiry_date || null, body.batch_number || null
-  ).run();
+  const batch = [
+    db.prepare(
+      `INSERT INTO products (
+        id, sku, barcode, name, category_id, brand_id, unit,
+        cost_price, selling_price, wholesale_price, min_stock, max_stock,
+        is_vat, is_active, expiry_date, batch_number
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`
+    ).bind(
+      prodId, body.sku, body.barcode, body.name, body.category_id || null, body.brand_id || null,
+      body.unit || 'ชิ้น', Number(body.cost_price) || 0, Number(body.selling_price) || 0,
+      Number(body.wholesale_price) || 0, Number(body.min_stock) || 5, Number(body.max_stock) || 500,
+      body.is_vat ? 1 : 0, body.expiry_date || null, body.batch_number || null
+    ),
+    db.prepare(
+      `INSERT INTO inventory (id, product_id, location_id, quantity, reserved_quantity)
+       VALUES (?, ?, 'loc_shelf', ?, 0)`
+    ).bind(genId("inv"), prodId, Number(body.initial_stock) || 0),
+    db.prepare(
+      `INSERT INTO audit_logs (id, user_id, user_name, action, module, record_id, details)
+       VALUES (?, ?, ?, 'PRODUCT_CREATE', 'PRODUCT', ?, ?)`
+    ).bind(genId("aud"), user.id, user.full_name, prodId, `เพิ่มสินค้าใหม่: ${body.name} (${body.barcode})`)
+  ];
 
-  // Create default inventory row for shelf
-  await db.prepare(
-    `INSERT INTO inventory (id, product_id, location_id, quantity, reserved_quantity)
-     VALUES (?, ?, 'loc_shelf', ?, 0)`
-  ).bind(genId("inv"), prodId, Number(body.initial_stock) || 0).run();
-
+  await db.batch(batch);
   return c.json({ success: true, message: "เพิ่มสินค้าใหม่เรียบร้อยแล้ว", id: prodId });
 });
 
-app.put("/products/:id", async (c) => {
+app.put("/products/:id", authMiddleware, requirePermission("product.manage"), async (c) => {
   const prodId = c.req.param("id");
   const body = await c.req.json();
   const db = c.env.DB;
+  const user = c.get("user")!;
 
-  await db.prepare(
-    `UPDATE products SET 
-      sku = ?, barcode = ?, name = ?, category_id = ?, brand_id = ?, unit = ?,
-      cost_price = ?, selling_price = ?, wholesale_price = ?, min_stock = ?, max_stock = ?,
-      is_vat = ?, expiry_date = ?, batch_number = ?, updated_at = datetime('now', 'localtime')
-     WHERE id = ?`
-  ).bind(
-    body.sku, body.barcode, body.name, body.category_id || null, body.brand_id || null, body.unit || 'ชิ้น',
-    Number(body.cost_price) || 0, Number(body.selling_price) || 0, Number(body.wholesale_price) || 0,
-    Number(body.min_stock) || 5, Number(body.max_stock) || 500, body.is_vat ? 1 : 0,
-    body.expiry_date || null, body.batch_number || null, prodId
-  ).run();
+  const batch = [
+    db.prepare(
+      `UPDATE products SET 
+        sku = ?, barcode = ?, name = ?, category_id = ?, brand_id = ?, unit = ?,
+        cost_price = ?, selling_price = ?, wholesale_price = ?, min_stock = ?, max_stock = ?,
+        is_vat = ?, expiry_date = ?, batch_number = ?, updated_at = datetime('now', 'localtime')
+       WHERE id = ?`
+    ).bind(
+      body.sku, body.barcode, body.name, body.category_id || null, body.brand_id || null, body.unit || 'ชิ้น',
+      Number(body.cost_price) || 0, Number(body.selling_price) || 0, Number(body.wholesale_price) || 0,
+      Number(body.min_stock) || 5, Number(body.max_stock) || 500, body.is_vat ? 1 : 0,
+      body.expiry_date || null, body.batch_number || null, prodId
+    ),
+    db.prepare(
+      `INSERT INTO audit_logs (id, user_id, user_name, action, module, record_id, details)
+       VALUES (?, ?, ?, 'PRODUCT_UPDATE', 'PRODUCT', ?, ?)`
+    ).bind(genId("aud"), user.id, user.full_name, prodId, `แก้ไขข้อมูลสินค้า: ${body.name}`)
+  ];
 
+  await db.batch(batch);
   return c.json({ success: true, message: "อัปเดตข้อมูลสินค้าเรียบร้อยแล้ว" });
 });
 
-app.delete("/products/:id", async (c) => {
+app.delete("/products/:id", authMiddleware, requirePermission("product.manage"), async (c) => {
   const prodId = c.req.param("id");
   const db = c.env.DB;
-  await db.prepare("UPDATE products SET is_active = 0 WHERE id = ?").bind(prodId).run();
+  const user = c.get("user")!;
+
+  const batch = [
+    db.prepare("UPDATE products SET is_active = 0 WHERE id = ?").bind(prodId),
+    db.prepare(
+      `INSERT INTO audit_logs (id, user_id, user_name, action, module, record_id, details)
+       VALUES (?, ?, ?, 'PRODUCT_DELETE', 'PRODUCT', ?, 'ปิดการใช้งานสินค้า')`
+    ).bind(genId("aud"), user.id, user.full_name, prodId)
+  ];
+
+  await db.batch(batch);
   return c.json({ success: true, message: "ปิดการใช้งานสินค้าเรียบร้อยแล้ว" });
 });
 
-// Categories & Brands
 app.get("/categories", async (c) => {
   const db = c.env.DB;
   const cats = await db.prepare("SELECT * FROM categories WHERE is_active = 1 ORDER BY name ASC").all();
@@ -612,7 +986,7 @@ app.get("/brands", async (c) => {
 });
 
 // -------------------------------------------------------------------
-// 6. INVENTORY & WAREHOUSE LOCATIONS
+// 6. INVENTORY & ATOMIC INTERNAL TRANSFERS
 // -------------------------------------------------------------------
 app.get("/inventory/locations", async (c) => {
   const db = c.env.DB;
@@ -626,9 +1000,10 @@ app.get("/inventory/locations", async (c) => {
   return c.json({ success: true, data: locs.results });
 });
 
-app.get("/inventory/stock-by-location", async (c) => {
+app.get("/inventory/stock-by-location", authMiddleware, requirePermission("inventory.view"), async (c) => {
   const db = c.env.DB;
-  const role = c.req.header("X-Role");
+  const user = c.get("user")!;
+  const canSeeCost = user.role_code === "OWNER_ADMIN" || user.permissions.includes("product.cost_view");
 
   const stocks = await db.prepare(
     `SELECT inv.*, p.name as product_name, p.sku, p.barcode, p.unit, p.cost_price, p.selling_price,
@@ -641,9 +1016,8 @@ app.get("/inventory/stock-by-location", async (c) => {
      ORDER BY wl.name, p.name`
   ).all();
 
-  // Strip cost_price if unauthorized
   const results = stocks.results.map((item: any) => {
-    if (role === "CASHIER" || role === "STOCK_CHECKER" || role === "WAREHOUSE") {
+    if (!canSeeCost) {
       const { cost_price, ...safe } = item;
       return safe;
     }
@@ -653,52 +1027,59 @@ app.get("/inventory/stock-by-location", async (c) => {
   return c.json({ success: true, data: results });
 });
 
-// Internal Stock Transfer between storage locations
-app.post("/inventory/transfer", async (c) => {
-  const { product_id, from_location_id, to_location_id, quantity, reason, user_id } = await c.req.json();
+// ATOMIC INTERNAL TRANSFER BETWEEN STORAGE LOCATIONS
+app.post("/inventory/transfer", authMiddleware, requirePermission("inventory.transfer"), async (c) => {
+  const { product_id, from_location_id, to_location_id, quantity, reason } = await c.req.json();
+  const user = c.get("user")!;
   const qty = Number(quantity);
 
-  if (qty <= 0) return c.json({ success: false, error: "จำนวนที่ย้ายต้องมากกว่า 0" }, 400);
+  if (!qty || qty <= 0) return c.json({ success: false, error: "จำนวนที่ย้ายต้องมากกว่า 0" }, 400);
   if (from_location_id === to_location_id) return c.json({ success: false, error: "จุดต้นทางและปลายทางต้องไม่เป็นที่เดียวกัน" }, 400);
 
   const db = c.env.DB;
 
-  // Check from stock
+  // Check source inventory sufficiency
   const fromStock: any = await db.prepare(
     "SELECT quantity FROM inventory WHERE product_id = ? AND location_id = ?"
   ).bind(product_id, from_location_id).first();
 
   if (!fromStock || fromStock.quantity < qty) {
-    return c.json({ success: false, error: `สต๊อกต้นทางไม่เพียงพอ (มีอยู่ ${fromStock?.quantity || 0})` }, 400);
+    return c.json({ success: false, error: `สต๊อกต้นทางไม่เพียงพอ (มีอยู่ ${fromStock?.quantity || 0}, ต้องการย้าย ${qty})` }, 400);
   }
 
-  // Deduct from source
-  await db.prepare(
-    "UPDATE inventory SET quantity = quantity - ?, updated_at = datetime('now', 'localtime') WHERE product_id = ? AND location_id = ?"
-  ).bind(qty, product_id, from_location_id).run();
+  // ATOMIC BATCH FOR TRANSFER
+  const batch = [
+    // Deduct from source
+    db.prepare(
+      "UPDATE inventory SET quantity = quantity - ?, updated_at = datetime('now', 'localtime') WHERE product_id = ? AND location_id = ?"
+    ).bind(qty, product_id, from_location_id),
+    // Add to destination
+    db.prepare(
+      `INSERT INTO inventory (id, product_id, location_id, quantity, reserved_quantity)
+       VALUES (?, ?, ?, ?, 0)
+       ON CONFLICT(product_id, location_id) DO UPDATE SET 
+        quantity = quantity + excluded.quantity,
+        updated_at = datetime('now', 'localtime')`
+    ).bind(genId("inv"), product_id, to_location_id, qty),
+    // Record movement
+    db.prepare(
+      `INSERT INTO inventory_movements (
+        id, product_id, from_location_id, to_location_id, movement_type,
+        quantity, reference_type, reason, created_by
+      ) VALUES (?, ?, ?, ?, 'internal_transfer', ?, 'transfer', ?, ?)`
+    ).bind(genId("mov"), product_id, from_location_id, to_location_id, qty, reason || 'ย้ายจุดจัดเก็บภายใน', user.full_name),
+    // Audit log
+    db.prepare(
+      `INSERT INTO audit_logs (id, user_id, user_name, action, module, record_id, details)
+       VALUES (?, ?, ?, 'STOCK_TRANSFER', 'INVENTORY', ?, ?)`
+    ).bind(genId("aud"), user.id, user.full_name, product_id, `ย้ายสินค้าจำนวน ${qty} ชิ้น จาก ${from_location_id} ไปยัง ${to_location_id}`)
+  ];
 
-  // Add to destination (Insert if not exists)
-  await db.prepare(
-    `INSERT INTO inventory (id, product_id, location_id, quantity, reserved_quantity)
-     VALUES (?, ?, ?, ?, 0)
-     ON CONFLICT(product_id, location_id) DO UPDATE SET 
-      quantity = quantity + excluded.quantity,
-      updated_at = datetime('now', 'localtime')`
-  ).bind(genId("inv"), product_id, to_location_id, qty).run();
-
-  // Record movement
-  await db.prepare(
-    `INSERT INTO inventory_movements (
-      id, product_id, from_location_id, to_location_id, movement_type,
-      quantity, reference_type, reason, created_by
-    ) VALUES (?, ?, ?, ?, 'internal_transfer', ?, 'transfer', ?, ?)`
-  ).bind(genId("mov"), product_id, from_location_id, to_location_id, qty, reason || 'ย้ายจุดจัดเก็บภายใน', user_id || 'Staff').run();
-
-  return c.json({ success: true, message: `ย้ายสินค้าจำนวน ${qty} ชิ้น เรียบร้อยแล้ว` });
+  await db.batch(batch);
+  return c.json({ success: true, message: `ย้ายสินค้าจำนวน ${qty} ชิ้น เรียบร้อยแล้ว (Atomic Transaction)` });
 });
 
-// Inventory Movements Log
-app.get("/inventory/movements", async (c) => {
+app.get("/inventory/movements", authMiddleware, requirePermission("inventory.view"), async (c) => {
   const db = c.env.DB;
   const movements = await db.prepare(
     `SELECT im.*, p.name as product_name, p.sku, p.unit,
@@ -714,12 +1095,11 @@ app.get("/inventory/movements", async (c) => {
 });
 
 // -------------------------------------------------------------------
-// 7. STOCK COUNTING (DEDICATED APP WITH BLIND COUNT)
+// 7. STOCK COUNTING (BLIND COUNT & ANTI-DOUBLE APPROVAL)
 // -------------------------------------------------------------------
-app.get("/stock-count/tasks", async (c) => {
+app.get("/stock-count/tasks", authMiddleware, requirePermission("stock_count.access"), async (c) => {
   const db = c.env.DB;
-  const role = c.req.header("X-Role");
-  const userId = c.req.header("X-User-Id");
+  const user = c.get("user")!;
 
   let query = `
     SELECT sct.*, wl.name as location_name, cat.name as category_name,
@@ -735,9 +1115,10 @@ app.get("/stock-count/tasks", async (c) => {
   `;
 
   let params: any[] = [];
-  if (role === "STOCK_CHECKER" && userId) {
+  // Stock checker ONLY sees tasks assigned to them!
+  if (user.role_code === "STOCK_CHECKER") {
     query += " WHERE sct.assigned_to = ? ";
-    params.push(userId);
+    params.push(user.id);
   }
 
   query += " GROUP BY sct.id ORDER BY sct.created_at DESC";
@@ -746,18 +1127,25 @@ app.get("/stock-count/tasks", async (c) => {
   return c.json({ success: true, data: tasks.results });
 });
 
-app.post("/stock-count/tasks", async (c) => {
-  const { title, location_id, category_id, assigned_to, user_id, notes } = await c.req.json();
+app.post("/stock-count/tasks", authMiddleware, requirePermission("stock_count.manage"), async (c) => {
+  const { title, location_id, category_id, assigned_to, notes } = await c.req.json();
   const db = c.env.DB;
+  const user = c.get("user")!;
   const taskId = genId("task");
   const taskCode = `CNT-${new Date().toISOString().slice(2, 10).replace(/-/g, '')}-${Math.floor(100 + Math.random() * 900)}`;
 
-  await db.prepare(
-    `INSERT INTO stock_count_tasks (id, task_code, title, location_id, category_id, status, assigned_to, created_by, notes)
-     VALUES (?, ?, ?, ?, ?, 'draft', ?, ?, ?)`
-  ).bind(taskId, taskCode, title, location_id, category_id || null, assigned_to, user_id, notes || '').run();
+  const batch = [
+    db.prepare(
+      `INSERT INTO stock_count_tasks (id, task_code, title, location_id, category_id, status, assigned_to, created_by, notes)
+       VALUES (?, ?, ?, ?, ?, 'draft', ?, ?, ?)`
+    ).bind(taskId, taskCode, title, location_id, category_id || null, assigned_to || user.id, user.id, notes || ''),
+    db.prepare(
+      `INSERT INTO audit_logs (id, user_id, user_name, action, module, record_id, details)
+       VALUES (?, ?, ?, 'STOCK_COUNT_CREATE', 'STOCK_COUNT', ?, ?)`
+    ).bind(genId("aud"), user.id, user.full_name, taskId, `สร้างใบงานนับสต๊อก ${taskCode}: ${title}`)
+  ];
 
-  // Populate items from inventory for this location
+  // Populate items from location
   let itemQuery = `
     SELECT p.id as product_id, COALESCE(inv.quantity, 0) as system_quantity
     FROM products p
@@ -772,19 +1160,22 @@ app.post("/stock-count/tasks", async (c) => {
 
   const prods = await db.prepare(itemQuery).bind(...params).all();
   for (const p of prods.results as any[]) {
-    await db.prepare(
-      `INSERT INTO stock_count_items (id, task_id, product_id, system_quantity, status)
-       VALUES (?, ?, ?, ?, 'pending')`
-    ).bind(genId("sci"), taskId, p.product_id, p.system_quantity).run();
+    batch.push(
+      db.prepare(
+        `INSERT INTO stock_count_items (id, task_id, product_id, system_quantity, status)
+         VALUES (?, ?, ?, ?, 'pending')`
+      ).bind(genId("sci"), taskId, p.product_id, p.system_quantity)
+    );
   }
 
-  return c.json({ success: true, message: `สร้างใบงานนับสต๊อก ${taskCode} สำเร็จแล้ว พร้อม ${prods.results.length} รายการ`, id: taskId });
+  await db.batch(batch);
+  return c.json({ success: true, message: `สร้างใบงานนับสต๊อก ${taskCode} สำเร็จแล้ว`, id: taskId });
 });
 
-// Task Details (Strict Blind Count for Stock Checker!)
-app.get("/stock-count/tasks/:id", async (c) => {
+// Task Details (Strict Blind Count for Stock Checkers based on verified session)
+app.get("/stock-count/tasks/:id", authMiddleware, requirePermission("stock_count.access"), async (c) => {
   const taskId = c.req.param("id");
-  const role = c.req.header("X-Role");
+  const user = c.get("user")!;
   const db = c.env.DB;
 
   const task = await db.prepare(
@@ -804,9 +1195,10 @@ app.get("/stock-count/tasks/:id", async (c) => {
      ORDER BY p.name ASC`
   ).bind(taskId).all();
 
-  // STRICT RULE: Never display expected stock quantity, cost, or difference to STOCK_CHECKER!
+  // STRICT RULE: If user is STOCK_CHECKER or has no approve permission, hide system_quantity & difference!
+  const isChecker = user.role_code === "STOCK_CHECKER";
   const safeItems = items.results.map((item: any) => {
-    if (role === "STOCK_CHECKER") {
+    if (isChecker) {
       const { system_quantity, difference, ...blind } = item;
       return blind;
     }
@@ -816,126 +1208,180 @@ app.get("/stock-count/tasks/:id", async (c) => {
   return c.json({ success: true, task, items: safeItems });
 });
 
-// Checker Submits count results
-app.post("/stock-count/tasks/:id/submit", async (c) => {
+// Checker Submits counts
+app.post("/stock-count/tasks/:id/submit", authMiddleware, requirePermission("stock_count.access"), async (c) => {
   const taskId = c.req.param("id");
-  const { counts } = await c.req.json(); // array of { id: sci_id, counted_quantity: number }
+  const { counts } = await c.req.json();
   const db = c.env.DB;
+  const user = c.get("user")!;
 
-  for (const c of counts) {
-    const item: any = await db.prepare("SELECT system_quantity FROM stock_count_items WHERE id = ?").bind(c.id).first();
-    const counted = Number(c.counted_quantity);
-    const diff = counted - (item?.system_quantity || 0);
-    const status = diff === 0 ? 'matched' : 'discrepancy';
+  const task: any = await db.prepare("SELECT * FROM stock_count_tasks WHERE id = ?").bind(taskId).first();
+  if (!task) return c.json({ success: false, error: "ไม่พบใบงาน" }, 404);
+  if (task.status === "approved") return c.json({ success: false, error: "ใบงานนี้ได้รับการอนุมัติไปแล้ว ไม่สามารถแก้ไขได้" }, 400);
 
-    await db.prepare(
-      `UPDATE stock_count_items SET 
-        counted_quantity = ?,
-        difference = ?,
-        status = ?,
-        counted_at = datetime('now', 'localtime')
-       WHERE id = ?`
-    ).bind(counted, diff, status, c.id).run();
+  // Check if assigned to this checker
+  if (user.role_code === "STOCK_CHECKER" && task.assigned_to !== user.id) {
+    return c.json({ success: false, error: "คุณไม่ได้เป็นผู้รับมอบหมายในใบงานตรวจนับนี้" }, 403);
   }
 
-  await db.prepare(
-    "UPDATE stock_count_tasks SET status = 'pending_approval', updated_at = datetime('now', 'localtime') WHERE id = ?"
-  ).bind(taskId).run();
+  const batch: any[] = [];
+  for (const item of counts) {
+    const sci: any = await db.prepare("SELECT system_quantity FROM stock_count_items WHERE id = ?").bind(item.id).first();
+    const counted = Number(item.counted_quantity);
+    const diff = counted - (sci?.system_quantity || 0);
+    const status = diff === 0 ? "matched" : "discrepancy";
 
+    batch.push(
+      db.prepare(
+        `UPDATE stock_count_items SET 
+          counted_quantity = ?,
+          difference = ?,
+          status = ?,
+          counted_at = datetime('now', 'localtime')
+         WHERE id = ?`
+      ).bind(counted, diff, status, item.id)
+    );
+  }
+
+  batch.push(
+    db.prepare("UPDATE stock_count_tasks SET status = 'pending_approval', updated_at = datetime('now', 'localtime') WHERE id = ?").bind(taskId)
+  );
+
+  batch.push(
+    db.prepare(
+      `INSERT INTO audit_logs (id, user_id, user_name, action, module, record_id, details)
+       VALUES (?, ?, ?, 'STOCK_COUNT_SUBMIT', 'STOCK_COUNT', ?, 'ส่งผลการตรวจนับรออนุมัติ')`
+    ).bind(genId("aud"), user.id, user.full_name, taskId)
+  );
+
+  await db.batch(batch);
   return c.json({ success: true, message: "บันทึกและส่งผลการตรวจนับให้ผู้จัดการตรวจสอบเรียบร้อยแล้ว" });
 });
 
-// Manager Approves count discrepancies & generates stock adjustment
-app.post("/stock-count/tasks/:id/approve", async (c) => {
+// Manager Approves count discrepancies (Anti-double approval & Atomic batch)
+app.post("/stock-count/tasks/:id/approve", authMiddleware, requirePermission("stock_count.approve"), async (c) => {
   const taskId = c.req.param("id");
-  const { approved_by } = await c.req.json();
   const db = c.env.DB;
+  const user = c.get("user")!;
 
   const task: any = await db.prepare("SELECT * FROM stock_count_tasks WHERE id = ?").bind(taskId).first();
   if (!task) return c.json({ success: false, error: "ไม่พบใบงาน" }, 404);
 
+  // Anti-Double Approval Guard
+  if (task.status === "approved") {
+    return c.json({ success: false, error: "ใบงานนี้ได้รับการอนุมัติไปแล้ว ป้องกันการอนุมัติซ้ำ" }, 400);
+  }
+  if (task.status !== "pending_approval") {
+    return c.json({ success: false, error: `ใบงานนี้ไม่อยู่ในสถานะรออนุมัติ (สถานะปัจจุบัน: ${task.status})` }, 400);
+  }
+
   const items = await db.prepare("SELECT * FROM stock_count_items WHERE task_id = ?").bind(taskId).all();
+  const batch: any[] = [];
 
   for (const item of items.results as any[]) {
     if (item.counted_quantity !== null && item.difference !== 0) {
       // Adjust inventory to match counted_quantity
-      await db.prepare(
-        `UPDATE inventory SET 
-          quantity = ?,
-          updated_at = datetime('now', 'localtime')
-         WHERE product_id = ? AND location_id = ?`
-      ).bind(item.counted_quantity, item.product_id, task.location_id).run();
+      batch.push(
+        db.prepare(
+          `UPDATE inventory SET quantity = ?, updated_at = datetime('now', 'localtime')
+           WHERE product_id = ? AND location_id = ?`
+        ).bind(item.counted_quantity, item.product_id, task.location_id)
+      );
 
-      // Record adjustment record
+      // Record adjustment
       const adjId = genId("adj");
       const adjCode = `ADJ-${new Date().toISOString().slice(2, 10).replace(/-/g, '')}-${Math.floor(100 + Math.random() * 900)}`;
 
-      await db.prepare(
-        `INSERT INTO stock_adjustments (
-          id, adjustment_code, task_id, product_id, location_id,
-          before_quantity, after_quantity, diff_quantity, reason, approved_by
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-      ).bind(
-        adjId, adjCode, taskId, item.product_id, task.location_id,
-        item.system_quantity, item.counted_quantity, item.difference,
-        `ปรับยอดตามผลตรวจนับใบงาน ${task.task_code}`, approved_by || 'Manager'
-      ).run();
+      batch.push(
+        db.prepare(
+          `INSERT INTO stock_adjustments (
+            id, adjustment_code, task_id, product_id, location_id,
+            before_quantity, after_quantity, diff_quantity, reason, approved_by
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        ).bind(
+          adjId, adjCode, taskId, item.product_id, task.location_id,
+          item.system_quantity, item.counted_quantity, item.difference,
+          `ปรับยอดตามผลตรวจนับใบงาน ${task.task_code}`, user.full_name
+        )
+      );
 
       // Record movement
-      const moveType = item.difference > 0 ? 'adjust_plus' : 'adjust_minus';
-      await db.prepare(
-        `INSERT INTO inventory_movements (
-          id, product_id, from_location_id, to_location_id, movement_type,
-          quantity, reference_type, reference_id, reason, created_by
-        ) VALUES (?, ?, ?, ?, ?, ?, 'stock_count', ?, ?, ?)`
-      ).bind(
-        genId("mov"), item.product_id,
-        item.difference < 0 ? task.location_id : null,
-        item.difference > 0 ? task.location_id : null,
-        moveType, Math.abs(item.difference), task.task_code,
-        `ปรับยอดสต๊อกจากการตรวจนับ (ผลต่าง ${item.difference})`, approved_by
-      ).run();
+      const moveType = item.difference > 0 ? "adjust_plus" : "adjust_minus";
+      batch.push(
+        db.prepare(
+          `INSERT INTO inventory_movements (
+            id, product_id, from_location_id, to_location_id, movement_type,
+            quantity, reference_type, reference_id, reason, created_by
+          ) VALUES (?, ?, ?, ?, ?, ?, 'stock_count', ?, ?, ?)`
+        ).bind(
+          genId("mov"), item.product_id,
+          item.difference < 0 ? task.location_id : null,
+          item.difference > 0 ? task.location_id : null,
+          moveType, Math.abs(item.difference), task.task_code,
+          `ปรับยอดสต๊อกจากการตรวจนับ (ผลต่าง ${item.difference})`, user.full_name
+        )
+      );
     }
   }
 
-  await db.prepare(
-    `UPDATE stock_count_tasks SET 
-      status = 'approved',
-      approved_by = ?,
-      approved_at = datetime('now', 'localtime'),
-      updated_at = datetime('now', 'localtime')
-     WHERE id = ?`
-  ).bind(approved_by || 'Manager', taskId).run();
+  // Update Task Status
+  batch.push(
+    db.prepare(
+      `UPDATE stock_count_tasks SET 
+        status = 'approved',
+        approved_by = ?,
+        approved_at = datetime('now', 'localtime'),
+        updated_at = datetime('now', 'localtime')
+       WHERE id = ?`
+    ).bind(user.full_name, taskId)
+  );
 
-  return c.json({ success: true, message: `อนุมัติผลตรวจนับและปรับปรุงยอดสต๊อกเรียบร้อยแล้ว` });
+  batch.push(
+    db.prepare(
+      `INSERT INTO audit_logs (id, user_id, user_name, action, module, record_id, details)
+       VALUES (?, ?, ?, 'STOCK_COUNT_APPROVE', 'STOCK_COUNT', ?, ?)`
+    ).bind(genId("aud"), user.id, user.full_name, taskId, `อนุมัติผลตรวจนับใบงาน ${task.task_code}`)
+  );
+
+  // ATOMIC COMMIT
+  await db.batch(batch);
+  return c.json({ success: true, message: "อนุมัติผลตรวจนับและปรับปรุงยอดสต๊อกเรียบร้อยแล้ว (Atomic Transaction)" });
 });
 
 // -------------------------------------------------------------------
 // 8. PURCHASING & SUPPLIERS
 // -------------------------------------------------------------------
-app.get("/suppliers", async (c) => {
+app.get("/suppliers", authMiddleware, async (c) => {
   const db = c.env.DB;
   const sups = await db.prepare("SELECT * FROM suppliers WHERE is_active = 1 ORDER BY name ASC").all();
   return c.json({ success: true, data: sups.results });
 });
 
-app.post("/suppliers", async (c) => {
+app.post("/suppliers", authMiddleware, requirePermission("supplier.manage"), async (c) => {
   const body = await c.req.json();
   const db = c.env.DB;
+  const user = c.get("user")!;
   const supId = genId("sup");
 
-  await db.prepare(
-    `INSERT INTO suppliers (id, code, name, tax_id, contact_person, phone, email, address, credit_terms_days)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).bind(
-    supId, body.code, body.name, body.tax_id || '', body.contact_person || '',
-    body.phone || '', body.email || '', body.address || '', Number(body.credit_terms_days) || 30
-  ).run();
+  const batch = [
+    db.prepare(
+      `INSERT INTO suppliers (id, code, name, tax_id, contact_person, phone, email, address, credit_terms_days)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(
+      supId, body.code, body.name, body.tax_id || '', body.contact_person || '',
+      body.phone || '', body.email || '', body.address || '', Number(body.credit_terms_days) || 30
+    ),
+    db.prepare(
+      `INSERT INTO audit_logs (id, user_id, user_name, action, module, record_id, details)
+       VALUES (?, ?, ?, 'SUPPLIER_CREATE', 'PURCHASING', ?, ?)`
+    ).bind(genId("aud"), user.id, user.full_name, supId, `เพิ่มคู่ค้า: ${body.name}`)
+  ];
 
+  await db.batch(batch);
   return c.json({ success: true, message: "เพิ่มคู่ค้า/ซัพพลายเออร์เรียบร้อยแล้ว" });
 });
 
-app.get("/purchasing/orders", async (c) => {
+app.get("/purchasing/orders", authMiddleware, requirePermission("purchasing.access"), async (c) => {
   const db = c.env.DB;
   const orders = await db.prepare(
     `SELECT po.*, s.name as supplier_name, e.full_name as creator_name
@@ -948,9 +1394,10 @@ app.get("/purchasing/orders", async (c) => {
   return c.json({ success: true, data: orders.results });
 });
 
-app.post("/purchasing/orders", async (c) => {
-  const { supplier_id, order_date, expected_date, items, notes, user_id } = await c.req.json();
+app.post("/purchasing/orders", authMiddleware, requirePermission("purchasing.create_po"), async (c) => {
+  const { supplier_id, order_date, expected_date, items, notes } = await c.req.json();
   const db = c.env.DB;
+  const user = c.get("user")!;
   const poId = genId("po");
   const poNumber = `PO-${new Date().toISOString().slice(2, 10).replace(/-/g, '')}-${Math.floor(100 + Math.random() * 900)}`;
 
@@ -961,88 +1408,134 @@ app.post("/purchasing/orders", async (c) => {
   const vatAmount = totalAmount * 0.07;
   const grandTotal = totalAmount + vatAmount;
 
-  await db.prepare(
-    `INSERT INTO purchase_orders (id, po_number, supplier_id, order_date, expected_date, status, total_amount, vat_amount, grand_total, notes, created_by)
-     VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)`
-  ).bind(poId, poNumber, supplier_id, order_date || new Date().toISOString().slice(0, 10), expected_date || null, totalAmount, vatAmount, grandTotal, notes || '', user_id).run();
+  const batch = [
+    db.prepare(
+      `INSERT INTO purchase_orders (id, po_number, supplier_id, order_date, expected_date, status, total_amount, vat_amount, grand_total, notes, created_by)
+       VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)`
+    ).bind(poId, poNumber, supplier_id, order_date || new Date().toISOString().slice(0, 10), expected_date || null, totalAmount, vatAmount, grandTotal, notes || '', user.id)
+  ];
 
   for (const it of items) {
-    await db.prepare(
-      `INSERT INTO purchase_order_items (id, po_id, product_id, quantity, unit_cost, total_cost)
-       VALUES (?, ?, ?, ?, ?, ?)`
-    ).bind(genId("poi"), poId, it.product_id, Number(it.quantity), Number(it.unit_cost), Number(it.quantity) * Number(it.unit_cost)).run();
+    batch.push(
+      db.prepare(
+        `INSERT INTO purchase_order_items (id, po_id, product_id, quantity, unit_cost, total_cost)
+         VALUES (?, ?, ?, ?, ?, ?)`
+      ).bind(genId("poi"), poId, it.product_id, Number(it.quantity), Number(it.unit_cost), Number(it.quantity) * Number(it.unit_cost))
+    );
   }
 
+  batch.push(
+    db.prepare(
+      `INSERT INTO audit_logs (id, user_id, user_name, action, module, record_id, details)
+       VALUES (?, ?, ?, 'PO_CREATE', 'PURCHASING', ?, ?)`
+    ).bind(genId("aud"), user.id, user.full_name, poId, `สร้างใบสั่งซื้อ ${poNumber} ยอด ฿${grandTotal.toFixed(2)}`)
+  );
+
+  await db.batch(batch);
   return c.json({ success: true, message: `สร้างใบสั่งซื้อ ${poNumber} เรียบร้อยแล้ว`, id: poId });
 });
 
-app.post("/purchasing/orders/:id/approve", async (c) => {
+app.post("/purchasing/orders/:id/approve", authMiddleware, requirePermission("purchasing.approve"), async (c) => {
   const poId = c.req.param("id");
-  const { user_id } = await c.req.json();
   const db = c.env.DB;
+  const user = c.get("user")!;
 
-  await db.prepare(
-    `UPDATE purchase_orders SET 
-      status = 'approved',
-      approved_by = ?,
-      approved_at = datetime('now', 'localtime')
-     WHERE id = ?`
-  ).bind(user_id || 'Manager', poId).run();
+  const batch = [
+    db.prepare(
+      `UPDATE purchase_orders SET 
+        status = 'approved',
+        approved_by = ?,
+        approved_at = datetime('now', 'localtime')
+       WHERE id = ?`
+    ).bind(user.full_name, poId),
+    db.prepare(
+      `INSERT INTO audit_logs (id, user_id, user_name, action, module, record_id, details)
+       VALUES (?, ?, ?, 'PO_APPROVE', 'PURCHASING', ?, 'อนุมัติใบสั่งซื้อ')`
+    ).bind(genId("aud"), user.id, user.full_name, poId)
+  ];
 
+  await db.batch(batch);
   return c.json({ success: true, message: "อนุมัติใบสั่งซื้อเรียบร้อยแล้ว ส่งต่อไปยังแผนกรับสินค้า" });
 });
 
-// Receive Goods (GRN) from PO into Main Warehouse
-app.post("/purchasing/orders/:id/receive", async (c) => {
+app.post("/purchasing/orders/:id/receive", authMiddleware, requirePermission("warehouse.receive"), async (c) => {
   const poId = c.req.param("id");
-  const { location_id, invoice_number, user_id } = await c.req.json();
+  const { location_id, invoice_number } = await c.req.json();
   const db = c.env.DB;
+  const user = c.get("user")!;
 
   const po: any = await db.prepare("SELECT * FROM purchase_orders WHERE id = ?").bind(poId).first();
   if (!po) return c.json({ success: false, error: "ไม่พบใบสั่งซื้อ" }, 404);
+  if (po.status === "completed") return c.json({ success: false, error: "ใบสั่งซื้อนี้รับสินค้าครบถ้วนไปแล้ว" }, 400);
 
   const items = await db.prepare("SELECT * FROM purchase_order_items WHERE po_id = ?").bind(poId).all();
   const targetLocation = location_id || 'loc_main';
+  const grnNumber = `GRN-${new Date().toISOString().slice(2, 10).replace(/-/g, '')}-${Math.floor(100 + Math.random() * 900)}`;
+
+  const batch: any[] = [];
 
   for (const it of items.results as any[]) {
     // Increase stock in warehouse
-    await db.prepare(
-      `INSERT INTO inventory (id, product_id, location_id, quantity, reserved_quantity)
-       VALUES (?, ?, ?, ?, 0)
-       ON CONFLICT(product_id, location_id) DO UPDATE SET 
-        quantity = quantity + excluded.quantity,
-        updated_at = datetime('now', 'localtime')`
-    ).bind(genId("inv"), it.product_id, targetLocation, it.quantity).run();
+    batch.push(
+      db.prepare(
+        `INSERT INTO inventory (id, product_id, location_id, quantity, reserved_quantity)
+         VALUES (?, ?, ?, ?, 0)
+         ON CONFLICT(product_id, location_id) DO UPDATE SET 
+          quantity = quantity + excluded.quantity,
+          updated_at = datetime('now', 'localtime')`
+      ).bind(genId("inv"), it.product_id, targetLocation, it.quantity)
+    );
 
     // Movement
-    await db.prepare(
-      `INSERT INTO inventory_movements (
-        id, product_id, from_location_id, to_location_id, movement_type,
-        quantity, unit_cost, reference_type, reference_id, reason, created_by
-      ) VALUES (?, ?, NULL, ?, 'purchase_in', ?, ?, 'po', ?, 'รับสินค้าเข้าคลังตามใบสั่งซื้อ', ?)`
-    ).bind(genId("mov"), it.product_id, targetLocation, it.quantity, it.unit_cost, po.po_number, user_id).run();
+    batch.push(
+      db.prepare(
+        `INSERT INTO inventory_movements (
+          id, product_id, from_location_id, to_location_id, movement_type,
+          quantity, unit_cost, reference_type, reference_id, reason, created_by
+        ) VALUES (?, ?, NULL, ?, 'purchase_in', ?, ?, 'po', ?, 'รับสินค้าเข้าคลังตามใบสั่งซื้อ', ?)`
+      ).bind(genId("mov"), it.product_id, targetLocation, it.quantity, it.unit_cost, po.po_number, user.full_name)
+    );
 
-    // Update PO item received qty
-    await db.prepare("UPDATE purchase_order_items SET received_quantity = quantity WHERE id = ?").bind(it.id).run();
+    // Update PO item
+    batch.push(
+      db.prepare("UPDATE purchase_order_items SET received_quantity = quantity WHERE id = ?").bind(it.id)
+    );
   }
 
   // Update PO status
-  await db.prepare("UPDATE purchase_orders SET status = 'completed' WHERE id = ?").bind(poId).run();
+  batch.push(
+    db.prepare("UPDATE purchase_orders SET status = 'completed' WHERE id = ?").bind(poId)
+  );
 
   // Create GRN
-  const grnNumber = `GRN-${new Date().toISOString().slice(2, 10).replace(/-/g, '')}-${Math.floor(100 + Math.random() * 900)}`;
-  await db.prepare(
-    `INSERT INTO goods_receipts (id, grn_number, po_id, supplier_id, location_id, receipt_date, invoice_number, total_amount, received_by)
-     VALUES (?, ?, ?, ?, ?, date('now', 'localtime'), ?, ?, ?)`
-  ).bind(genId("grn"), grnNumber, poId, po.supplier_id, targetLocation, invoice_number || '', po.grand_total, user_id).run();
+  batch.push(
+    db.prepare(
+      `INSERT INTO goods_receipts (id, grn_number, po_id, supplier_id, location_id, receipt_date, invoice_number, total_amount, received_by)
+       VALUES (?, ?, ?, ?, ?, date('now', 'localtime'), ?, ?, ?)`
+    ).bind(genId("grn"), grnNumber, poId, po.supplier_id, targetLocation, invoice_number || '', po.grand_total, user.full_name)
+  );
 
+  // Update Supplier balance (Accounts Payable)
+  batch.push(
+    db.prepare("UPDATE suppliers SET balance = balance + ? WHERE id = ?").bind(po.grand_total, po.supplier_id)
+  );
+
+  // Audit log
+  batch.push(
+    db.prepare(
+      `INSERT INTO audit_logs (id, user_id, user_name, action, module, record_id, details)
+       VALUES (?, ?, ?, 'GOODS_RECEIVE', 'WAREHOUSE', ?, ?)`
+    ).bind(genId("aud"), user.id, user.full_name, poId, `รับสินค้าตาม PO ${po.po_number} เข้าคลัง ${targetLocation} ใบรับของ ${grnNumber}`)
+  );
+
+  await db.batch(batch);
   return c.json({ success: true, message: `รับสินค้าตามใบสั่งซื้อ ${po.po_number} เข้าคลังสำเร็จ (ใบรับของ ${grnNumber})` });
 });
 
 // -------------------------------------------------------------------
 // 9. CUSTOMERS & MEMBERSHIP
 // -------------------------------------------------------------------
-app.get("/customers", async (c) => {
+app.get("/customers", authMiddleware, async (c) => {
   const db = c.env.DB;
   const search = c.req.query("q") || "";
 
@@ -1058,35 +1551,44 @@ app.get("/customers", async (c) => {
   return c.json({ success: true, data: custs.results });
 });
 
-app.post("/customers", async (c) => {
+app.post("/customers", authMiddleware, requirePermission("customer.manage"), async (c) => {
   const body = await c.req.json();
   const db = c.env.DB;
+  const user = c.get("user")!;
   const custId = genId("cust");
   const memberCode = `MB-${Math.floor(1000 + Math.random() * 9000)}`;
 
-  await db.prepare(
-    `INSERT INTO customers (id, member_code, name, phone, email, address, membership_tier, discount_pct)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-  ).bind(
-    custId, memberCode, body.name, body.phone, body.email || '',
-    body.address || '', body.membership_tier || 'Silver', Number(body.discount_pct) || 0
-  ).run();
+  const batch = [
+    db.prepare(
+      `INSERT INTO customers (id, member_code, name, phone, email, address, membership_tier, discount_pct)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(
+      custId, memberCode, body.name, body.phone, body.email || '',
+      body.address || '', body.membership_tier || 'Silver', Number(body.discount_pct) || 0
+    ),
+    db.prepare(
+      `INSERT INTO audit_logs (id, user_id, user_name, action, module, record_id, details)
+       VALUES (?, ?, ?, 'CUSTOMER_CREATE', 'CUSTOMER', ?, ?)`
+    ).bind(genId("aud"), user.id, user.full_name, custId, `ลงทะเบียนสมาชิกใหม่: ${body.name} (${memberCode})`)
+  ];
 
+  await db.batch(batch);
   return c.json({ success: true, message: `ลงทะเบียนสมาชิกรหัส ${memberCode} สำเร็จแล้ว` });
 });
 
 // -------------------------------------------------------------------
 // 10. ACCOUNTING & EXPENSES
 // -------------------------------------------------------------------
-app.get("/accounting/expenses", async (c) => {
+app.get("/accounting/expenses", authMiddleware, requirePermission("accounting.access"), async (c) => {
   const db = c.env.DB;
   const exps = await db.prepare("SELECT * FROM expenses ORDER BY expense_date DESC LIMIT 100").all();
   return c.json({ success: true, data: exps.results });
 });
 
-app.post("/accounting/expenses", async (c) => {
+app.post("/accounting/expenses", authMiddleware, requirePermission("accounting.expenses"), async (c) => {
   const body = await c.req.json();
   const db = c.env.DB;
+  const user = c.get("user")!;
   const expId = genId("exp");
   const expNo = `EXP-${new Date().toISOString().slice(2, 10).replace(/-/g, '')}-${Math.floor(100 + Math.random() * 900)}`;
 
@@ -1094,32 +1596,36 @@ app.post("/accounting/expenses", async (c) => {
   const vat = body.has_vat ? amount * 0.07 : 0;
   const grandTotal = amount + vat;
 
-  await db.prepare(
-    `INSERT INTO expenses (id, expense_no, category, description, amount, vat_amount, grand_total, recipient, paid_by, payment_method, expense_date)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).bind(
-    expId, expNo, body.category || 'ทั่วไป', body.description,
-    amount, vat, grandTotal, body.recipient || '', body.paid_by || '',
-    body.payment_method || 'cash', body.expense_date || new Date().toISOString().slice(0, 10)
-  ).run();
+  const batch = [
+    db.prepare(
+      `INSERT INTO expenses (id, expense_no, category, description, amount, vat_amount, grand_total, recipient, paid_by, payment_method, expense_date)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(
+      expId, expNo, body.category || 'ทั่วไป', body.description,
+      amount, vat, grandTotal, body.recipient || '', user.full_name,
+      body.payment_method || 'cash', body.expense_date || new Date().toISOString().slice(0, 10)
+    ),
+    db.prepare(
+      `INSERT INTO audit_logs (id, user_id, user_name, action, module, record_id, details)
+       VALUES (?, ?, ?, 'EXPENSE_CREATE', 'ACCOUNTING', ?, ?)`
+    ).bind(genId("aud"), user.id, user.full_name, expId, `บันทึกค่าใช้จ่าย ${expNo}: ${body.description} ฿${grandTotal.toFixed(2)}`)
+  ];
 
+  await db.batch(batch);
   return c.json({ success: true, message: `บันทึกค่าใช้จ่าย ${expNo} เรียบร้อยแล้ว` });
 });
 
-app.get("/accounting/summary", async (c) => {
+app.get("/accounting/summary", authMiddleware, requirePermission("accounting.access"), async (c) => {
   const db = c.env.DB;
 
-  // Sales Revenue
   const rev: any = await db.prepare(
     "SELECT COALESCE(SUM(grand_total), 0) as total_sales, COALESCE(SUM(vat_amount), 0) as sales_vat FROM sales WHERE status = 'completed'"
   ).first();
 
-  // Expenses
   const exp: any = await db.prepare(
     "SELECT COALESCE(SUM(grand_total), 0) as total_expense, COALESCE(SUM(vat_amount), 0) as expense_vat FROM expenses"
   ).first();
 
-  // Purchases
   const pur: any = await db.prepare(
     "SELECT COALESCE(SUM(grand_total), 0) as total_purchase FROM purchase_orders WHERE status = 'completed'"
   ).first();
@@ -1143,7 +1649,7 @@ app.get("/accounting/summary", async (c) => {
 // -------------------------------------------------------------------
 // 11. EMPLOYEES & RBAC
 // -------------------------------------------------------------------
-app.get("/employees", async (c) => {
+app.get("/employees", authMiddleware, requirePermission("employees.manage"), async (c) => {
   const db = c.env.DB;
   const emps = await db.prepare(
     `SELECT e.id, e.employee_code, e.username, e.full_name, e.role_code, e.email, e.phone, e.position, e.status, e.last_login_at,
@@ -1156,34 +1662,54 @@ app.get("/employees", async (c) => {
   return c.json({ success: true, data: emps.results });
 });
 
-app.post("/employees", async (c) => {
+app.post("/employees", authMiddleware, requirePermission("employees.manage"), async (c) => {
   const body = await c.req.json();
   const db = c.env.DB;
+  const user = c.get("user")!;
   const empId = genId("emp");
   const empCode = `EMP-${Math.floor(100 + Math.random() * 900)}`;
 
-  await db.prepare(
-    `INSERT INTO employees (id, employee_code, username, password_hash, full_name, role_code, email, phone, position, status)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')`
-  ).bind(
-    empId, empCode, body.username, body.password || '123456', body.full_name,
-    body.role_code, body.email || '', body.phone || '', body.position || ''
-  ).run();
+  // Securely hash initial password
+  const hashedPassword = await hashPassword(body.password || "123456");
 
+  const batch = [
+    db.prepare(
+      `INSERT INTO employees (id, employee_code, username, password_hash, full_name, role_code, email, phone, position, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')`
+    ).bind(
+      empId, empCode, body.username, hashedPassword, body.full_name,
+      body.role_code, body.email || '', body.phone || '', body.position || ''
+    ),
+    db.prepare(
+      `INSERT INTO audit_logs (id, user_id, user_name, action, module, record_id, details)
+       VALUES (?, ?, ?, 'EMP_CREATE', 'EMPLOYEES', ?, ?)`
+    ).bind(genId("aud"), user.id, user.full_name, empId, `เพิ่มพนักงานใหม่: ${body.full_name} (${empCode}) บทบาท ${body.role_code}`)
+  ];
+
+  await db.batch(batch);
   return c.json({ success: true, message: `เพิ่มพนักงาน ${body.full_name} เรียบร้อยแล้ว` });
 });
 
-app.put("/employees/:id/status", async (c) => {
+app.put("/employees/:id/status", authMiddleware, requireOwnerOnly(), async (c) => {
   const empId = c.req.param("id");
   const { status } = await c.req.json();
   const db = c.env.DB;
+  const user = c.get("user")!;
 
-  await db.prepare("UPDATE employees SET status = ?, updated_at = datetime('now', 'localtime') WHERE id = ?").bind(status, empId).run();
+  const batch = [
+    db.prepare("UPDATE employees SET status = ?, updated_at = datetime('now', 'localtime') WHERE id = ?").bind(status, empId),
+    db.prepare("DELETE FROM user_sessions WHERE user_id = ?").bind(empId), // Revoke active sessions immediately
+    db.prepare(
+      `INSERT INTO audit_logs (id, user_id, user_name, action, module, record_id, details)
+       VALUES (?, ?, ?, 'EMP_STATUS_UPDATE', 'EMPLOYEES', ?, ?)`
+    ).bind(genId("aud"), user.id, user.full_name, empId, `เปลี่ยนสถานะพนักงานเป็น ${status}`)
+  ];
+
+  await db.batch(batch);
   return c.json({ success: true, message: `ปรับสถานะพนักงานเป็น ${status} เรียบร้อยแล้ว` });
 });
 
-// Roles & Permissions Master
-app.get("/roles", async (c) => {
+app.get("/roles", authMiddleware, async (c) => {
   const db = c.env.DB;
   const roles = await db.prepare("SELECT * FROM roles ORDER BY created_at ASC").all();
 
@@ -1199,31 +1725,60 @@ app.get("/roles", async (c) => {
   return c.json({ success: true, data: roleList });
 });
 
-app.get("/permissions", async (c) => {
+app.get("/permissions", authMiddleware, async (c) => {
   const db = c.env.DB;
   const perms = await db.prepare("SELECT * FROM permissions ORDER BY module, code").all();
   return c.json({ success: true, data: perms.results });
 });
 
-// Update Role Permissions (Permission Builder for Owner)
-app.put("/roles/:id/permissions", async (c) => {
+// Update Role Permissions (Permission Builder - Strict Owner Only)
+app.put("/roles/:id/permissions", authMiddleware, requireOwnerOnly(), async (c) => {
   const roleId = c.req.param("id");
   const { permissions } = await c.req.json();
   const db = c.env.DB;
+  const user = c.get("user")!;
 
-  await db.prepare("DELETE FROM role_permissions WHERE role_id = ?").bind(roleId).run();
-
-  for (const p of permissions) {
-    await db.prepare("INSERT INTO role_permissions (role_id, permission_code) VALUES (?, ?)").bind(roleId, p).run();
+  const role: any = await db.prepare("SELECT code, name FROM roles WHERE id = ?").bind(roleId).first();
+  if (role?.code === "OWNER_ADMIN") {
+    return c.json({ success: false, error: "ไม่สามารถลดสิทธิ์ของบทบาท OWNER_ADMIN ได้" }, 403);
   }
 
+  const batch = [
+    db.prepare("DELETE FROM role_permissions WHERE role_id = ?").bind(roleId)
+  ];
+
+  for (const p of permissions) {
+    batch.push(
+      db.prepare("INSERT INTO role_permissions (role_id, permission_code) VALUES (?, ?)").bind(roleId, p)
+    );
+  }
+
+  batch.push(
+    db.prepare(
+      `INSERT INTO audit_logs (id, user_id, user_name, action, module, record_id, details)
+       VALUES (?, ?, ?, 'ROLE_PERM_UPDATE', 'SETTINGS', ?, ?)`
+    ).bind(genId("aud"), user.id, user.full_name, roleId, `อัปเดตสิทธิ์บทบาท ${role?.name || roleId} จำนวน ${permissions.length} สิทธิ์`)
+  );
+
+  await db.batch(batch);
   return c.json({ success: true, message: "อัปเดตชุดสิทธิ์การใช้งานสำหรับบทบาทนี้เรียบร้อยแล้ว" });
 });
 
 // -------------------------------------------------------------------
-// 12. NOTIFICATIONS
+// 12. AUDIT LOGS (RESTRICTED AUDITING)
 // -------------------------------------------------------------------
-app.get("/notifications", async (c) => {
+app.get("/audit-logs", authMiddleware, requireOwnerOnly(), async (c) => {
+  const db = c.env.DB;
+  const logs = await db.prepare(
+    "SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT 100"
+  ).all();
+  return c.json({ success: true, data: logs.results });
+});
+
+// -------------------------------------------------------------------
+// 13. NOTIFICATIONS
+// -------------------------------------------------------------------
+app.get("/notifications", authMiddleware, async (c) => {
   const db = c.env.DB;
   const notifs = await db.prepare(
     "SELECT * FROM notifications ORDER BY created_at DESC LIMIT 20"

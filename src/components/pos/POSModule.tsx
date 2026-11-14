@@ -51,9 +51,37 @@ export const POSModule: React.FC = () => {
   const [storeProfile, setStoreProfile] = useState<any>(null);
   const [activeShift, setActiveShift] = useState<CashierShift | null>(null);
 
-  // Cart & Orders
-  const [cart, setCart] = useState<CartItem[]>([]);
-  const [heldOrders, setHeldOrders] = useState<{ id: string; timestamp: string; items: CartItem[]; customer: Customer | null }[]>([]);
+  // Cart & Orders (Persisted in localStorage across refreshes)
+  const [cart, setCart] = useState<CartItem[]>(() => {
+    try {
+      const saved = localStorage.getItem("happymart_pos_cart");
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+
+  const [heldOrders, setHeldOrders] = useState<{ id: string; timestamp: string; items: CartItem[]; customer: Customer | null }[]>(() => {
+    try {
+      const saved = localStorage.getItem("happymart_pos_held_orders");
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+
+  // Save cart and held orders to localStorage whenever they change
+  useEffect(() => {
+    try {
+      localStorage.setItem("happymart_pos_cart", JSON.stringify(cart));
+    } catch {}
+  }, [cart]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem("happymart_pos_held_orders", JSON.stringify(heldOrders));
+    } catch {}
+  }, [heldOrders]);
   const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(null);
   const [customDiscount, setCustomDiscount] = useState<number>(0);
   const [orderNumber, setOrderNumber] = useState<number>(1001);
@@ -226,12 +254,16 @@ export const POSModule: React.FC = () => {
     setTenderedInput(grandTotal.toFixed(2));
   };
 
-  // PromptPay QR Generation (Instant Client-side Rule #3)
+  // PromptPay QR Generation (Only when storeProfile has a configured promptpay_id)
   useEffect(() => {
     if (paymentMethod === "promptpay" && grandTotal > 0) {
-      generatePromptPayQR(storeProfile?.promptpay_id || "0812345678", grandTotal).then((res) => {
-        setPromptPayQR(res);
-      });
+      if (storeProfile?.promptpay_id && storeProfile.promptpay_id.trim() !== "") {
+        generatePromptPayQR(storeProfile.promptpay_id.trim(), grandTotal).then((res) => {
+          setPromptPayQR(res);
+        });
+      } else {
+        setPromptPayQR(null);
+      }
     }
   }, [paymentMethod, grandTotal, storeProfile]);
 
@@ -271,37 +303,25 @@ export const POSModule: React.FC = () => {
 
     setIsProcessingCheckout(true);
     try {
+      const idempotencyKey = `pos_${Date.now()}_${Math.random().toString(36).substring(2, 10)}`;
       const checkoutData = {
         shift_id: activeShift?.id || null,
-        cashier_id: currentUser?.id,
         customer_id: selectedCustomer?.id || null,
-        customer_name: selectedCustomer?.name || "ลูกค้าทั่วไป",
         items: cart.map((item) => ({
           product_id: item.product.id,
-          name: item.product.name,
-          barcode: item.product.barcode,
-          unit: item.product.unit,
           quantity: item.quantity,
-          unit_price: item.unit_price,
-          cost_price: item.product.cost_price || 0,
-          discount_amount: item.discount,
-          subtotal: item.subtotal,
         })),
-        subtotal: rawSubtotal,
-        discount_amount: totalDiscount,
-        vat_amount: vatAmount,
-        grand_total: grandTotal,
         payment_method: paymentMethod,
         received_amount: paymentMethod === "cash" ? tenderedNumber : grandTotal,
-        change_amount: paymentMethod === "cash" ? changeDue : 0,
+        idempotency_key: idempotencyKey,
       };
 
-      const res = await api.checkout(checkoutData);
+      const res = await api.checkout(checkoutData, idempotencyKey);
 
       setCompletedSale({
         ...res.sale,
         items: res.items || cart,
-        change_amount: checkoutData.change_amount,
+        change_amount: res.sale?.change_amount ?? (paymentMethod === "cash" ? Math.max(0, tenderedNumber - grandTotal) : 0),
         customer_name: selectedCustomer?.name,
       });
 
@@ -753,20 +773,27 @@ export const POSModule: React.FC = () => {
             /* PromptPay Instant QR Display (Rule #3) */
             <div className="bg-white rounded-3xl p-5 border border-slate-200 shadow-sm flex flex-col items-center justify-center mb-3">
               <span className="text-xs font-bold text-slate-700 mb-2">
-                สแกนจ่ายผ่าน PromptPay QR (0.01s Instant Client Render)
+                สแกนจ่ายผ่าน PromptPay QR (Instant Render)
               </span>
-              {promptPayQR?.qrDataUrl ? (
-                <div className="p-3 bg-white rounded-2xl border-2 border-blue-100 shadow-inner">
-                  <img src={promptPayQR.qrDataUrl} alt="PromptPay" className="w-44 h-44" />
-                </div>
+              {storeProfile?.promptpay_id ? (
+                promptPayQR?.qrDataUrl ? (
+                  <div className="p-3 bg-white rounded-2xl border-2 border-blue-100 shadow-inner">
+                    <img src={promptPayQR.qrDataUrl} alt="PromptPay" className="w-44 h-44" />
+                  </div>
+                ) : (
+                  <div className="w-44 h-44 bg-slate-100 rounded-2xl animate-pulse" />
+                )
               ) : (
-                <div className="w-44 h-44 bg-slate-100 rounded-2xl animate-pulse" />
+                <div className="p-6 text-center text-xs text-amber-700 bg-amber-50 rounded-2xl border border-amber-200">
+                  <AlertCircle className="w-8 h-8 text-amber-600 mx-auto mb-2" />
+                  ยังไม่ได้กำหนดเลขพร้อมเพย์ร้านค้า กรุณาระบุในเมนู "ตั้งค่าระบบ &gt; ข้อมูลร้านค้า"
+                </div>
               )}
               <div className="mt-2 text-2xl font-black text-blue-700">
                 ฿{grandTotal.toFixed(2)}
               </div>
               <span className="text-[11px] text-slate-400 mt-0.5">
-                พร้อมเพย์: {storeProfile?.promptpay_id || "0812345678"}
+                {storeProfile?.promptpay_id ? `พร้อมเพย์ร้านค้า: ${storeProfile.promptpay_id}` : "รอการตั้งค่า"}
               </span>
             </div>
           ) : (

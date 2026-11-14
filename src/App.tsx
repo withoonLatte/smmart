@@ -18,8 +18,15 @@ import { ReportsModule } from "@/components/reports/ReportsModule";
 import { useAuthStore, ROLE_PRESETS } from "@/store/useAuthStore";
 
 export function App() {
-  const { activeRole } = useAuthStore();
+  const { activeRole, sessionToken, switchRole } = useAuthStore();
   const [currentModule, setCurrentModule] = useState<string>("dashboard");
+
+  // Ensure initial cryptographic session token is active
+  useEffect(() => {
+    if (!sessionToken) {
+      switchRole(activeRole);
+    }
+  }, []);
 
   // Enforce role-based redirect when activeRole changes
   useEffect(() => {
