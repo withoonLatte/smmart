@@ -447,10 +447,36 @@ export const POSModule: React.FC = () => {
       return;
     }
 
+    let shiftToUse = activeShift;
+    if (!shiftToUse) {
+      // Auto-open prompt if cashier has not opened shift yet
+      const wantAutoOpen = confirm(
+        "⚠️ ยังไม่ได้เปิดกะขายแคชเชียร์\n\nต้องการเปิดกะขายทันที (เงินทอนเริ่มต้น ฿1,000) เพื่อชำระเงินต่อเลยหรือไม่?\n\n• กด 'ตกลง (OK)' เพื่อเปิดกะและคิดเงินทันที\n• กด 'ยกเลิก (Cancel)' เพื่อไประบุเงินทอนเริ่มต้นเอง"
+      );
+      if (wantAutoOpen) {
+        try {
+          const shiftRes = await api.openShift({
+            cashier_id: currentUser?.id,
+            cashier_name: currentUser?.full_name,
+            opening_cash: 1000,
+            notes: "เปิดกะขายด่วนจากหน้าชำระเงิน",
+          });
+          shiftToUse = shiftRes.shift;
+          setActiveShift(shiftRes.shift);
+        } catch (sErr: any) {
+          setIsShiftModalOpen(true);
+          return;
+        }
+      } else {
+        setIsShiftModalOpen(true);
+        return;
+      }
+    }
+
     setIsProcessingCheckout(true);
     try {
       const checkoutData = {
-        shift_id: activeShift?.id || null,
+        shift_id: shiftToUse?.id || null,
         customer_id: selectedCustomer?.id || null,
         items: cart.map((item) => ({
           product_id: item.product.id,
@@ -1631,28 +1657,54 @@ export const POSModule: React.FC = () => {
                 </div>
               </div>
             ) : (
-              <div className="space-y-3">
+              <div className="space-y-4">
+                <div className="p-3 bg-[#F1FAEE] rounded-2xl border border-[#A8DADC]/60 text-xs text-[#1D3557]">
+                  <p className="font-bold">💡 กรุณาเปิดกะก่อนทำการขาย</p>
+                  <p className="text-[11px] text-[#457B9D] mt-0.5">
+                    เพื่อบันทึกยอดเงินสดในลิ้นชักและกระทบยอดเงินทอนหลังปิดกะ
+                  </p>
+                </div>
+
                 <div>
-                  <label className="text-xs font-semibold text-slate-700 block mb-1">
-                    เงินทอนตั้งต้น (บาท)
+                  <label className="text-xs font-bold text-[#1D3557] block mb-1.5 uppercase tracking-wider">
+                    เงินทอนตั้งต้นในลิ้นชัก (บาท)
                   </label>
                   <input
                     type="number"
                     value={openingCashInput}
                     onChange={(e) => setOpeningCashInput(e.target.value)}
-                    className="w-full text-base font-black px-3 py-2 bg-white border border-slate-300 rounded-xl"
+                    className="w-full text-xl font-black px-4 py-3 bg-[#F1FAEE]/40 border-2 border-[#457B9D] text-[#1D3557] rounded-2xl focus:outline-none focus:border-[#1D3557]"
                   />
+
+                  {/* Quick Select Buttons */}
+                  <div className="grid grid-cols-4 gap-1.5 mt-2">
+                    {[0, 500, 1000, 2000].map((amt) => (
+                      <button
+                        key={amt}
+                        type="button"
+                        onClick={() => setOpeningCashInput(amt.toString())}
+                        className={`py-1.5 rounded-xl border text-xs font-bold transition-all ${
+                          openingCashInput === amt.toString()
+                            ? "bg-[#1D3557] text-[#F1FAEE] border-[#1D3557]"
+                            : "bg-white text-[#457B9D] border-[#A8DADC]/60 hover:bg-[#F1FAEE]"
+                        }`}
+                      >
+                        ฿{amt.toLocaleString()}
+                      </button>
+                    ))}
+                  </div>
                 </div>
+
                 <div className="flex gap-2 pt-2">
                   <button
                     onClick={() => setIsShiftModalOpen(false)}
-                    className="flex-1 py-2 rounded-xl border border-slate-200 text-xs font-semibold text-slate-600"
+                    className="flex-1 py-3 rounded-2xl border border-[#A8DADC]/80 text-xs font-bold text-[#457B9D] hover:bg-[#F1FAEE]"
                   >
                     ยกเลิก
                   </button>
                   <button
                     onClick={handleOpenShift}
-                    className="flex-1 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold shadow-md shadow-blue-500/20"
+                    className="flex-1 py-3 rounded-2xl bg-gradient-to-r from-[#457B9D] to-[#1D3557] hover:opacity-95 text-white text-xs font-black shadow-md shadow-[#1D3557]/20 active:scale-95"
                   >
                     เปิดกะขายทันที
                   </button>

@@ -752,13 +752,36 @@ app.post("/pos/checkout", authMiddleware, requirePermission("pos.checkout"), asy
   }
 
   // P0.7: Validate Shift ID, Cashier ID, and ensure Shift is active / open
-  if (!shift_id) {
-    return c.json({ success: false, error: "SHIFT_REQUIRED", message: "กรุณาระบุรหัสกะขาย (Shift ID) ก่อนทำรายการ" }, 400);
+  let effectiveShiftId = shift_id;
+  if (!effectiveShiftId) {
+    // 1. Try to find an existing open shift for this user
+    const openShift: any = await db.prepare(
+      "SELECT id FROM cashier_shifts WHERE (cashier_id = ? OR cashier_id IS NULL) AND status = 'open' ORDER BY opened_at DESC LIMIT 1"
+    ).bind(user.id).first();
+
+    if (openShift) {
+      effectiveShiftId = openShift.id;
+    } else {
+      // 2. Auto-open a default shift for user so checkout is seamlessly completed
+      const autoShiftId = genId("shift");
+      const autoShiftCode = `SFT-${new Date().toISOString().slice(2, 10).replace(/-/g, '')}-${Math.floor(1000 + Math.random() * 9000)}`;
+      await db.batch([
+        db.prepare(
+          `INSERT INTO cashier_shifts (id, shift_code, cashier_id, cashier_name, opening_cash, expected_cash, notes)
+           VALUES (?, ?, ?, ?, 1000, 1000, 'Auto-opened POS shift on checkout')`
+        ).bind(autoShiftId, autoShiftCode, user.id, user.full_name),
+        db.prepare(
+          `INSERT INTO audit_logs (id, user_id, user_name, action, module, record_id, details)
+           VALUES (?, ?, ?, 'SHIFT_OPEN', 'POS', ?, 'เปิดกะอัตโนมัติจากการทำรายการชำระเงิน')`
+        ).bind(genId("aud"), user.id, user.full_name, autoShiftId)
+      ]);
+      effectiveShiftId = autoShiftId;
+    }
   }
 
   const shift: any = await db.prepare(
     "SELECT * FROM cashier_shifts WHERE id = ? AND status = 'open'"
-  ).bind(shift_id).first();
+  ).bind(effectiveShiftId).first();
 
   if (!shift) {
     return c.json({ success: false, error: "SHIFT_INVALID", message: "ไม่พบกะขายที่กำลังเปิดอยู่ หรือกะขายนี้ถูกปิดไปแล้ว" }, 400);
