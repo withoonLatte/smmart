@@ -97,13 +97,17 @@ export function App() {
     }
   };
 
+  const isCashier = activeRole === "CASHIER";
+
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-[#F8FAFC]">
-      {/* Sidebar Navigation */}
-      <Sidebar
-        currentModule={currentModule}
-        onSelectModule={(mod) => setCurrentModule(mod)}
-      />
+      {/* Sidebar Navigation - Hidden for Cashier to maximize POS workspace */}
+      {!isCashier && (
+        <Sidebar
+          currentModule={currentModule}
+          onSelectModule={(mod) => setCurrentModule(mod)}
+        />
+      )}
 
       {/* Main Content Area */}
       <div className="flex-1 flex flex-col h-full overflow-hidden">
