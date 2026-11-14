@@ -10,12 +10,15 @@ import {
   CircleDollarSign,
   Receipt,
   Sparkles,
+  ShieldCheck,
 } from "lucide-react";
 import { api } from "@/services/api";
+import { SystemAuditModal } from "@/components/audit/SystemAuditModal";
 
 export const OwnerDashboard: React.FC = () => {
   const [data, setData] = useState<any>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [showAuditModal, setShowAuditModal] = useState(false);
 
   useEffect(() => {
     api.getDashboardSummary()
@@ -54,9 +57,21 @@ export const OwnerDashboard: React.FC = () => {
             ข้อมูลอัปเดตแบบเรียลไทม์จาก Cloudflare D1 Remote Database
           </p>
         </div>
-        <div className="flex items-center gap-2 text-xs font-bold px-3.5 py-1.5 rounded-full bg-[#A8DADC]/30 text-[#1D3557] border border-[#A8DADC]/80 shadow-xs">
-          <Sparkles className="w-3.5 h-3.5 text-[#E63946]" />
-          <span>สาขาหลัก 00000 (Single Branch Mode)</span>
+        <div className="flex items-center gap-2 flex-wrap">
+          <button
+            onClick={() => setShowAuditModal(true)}
+            className="flex items-center gap-1.5 text-xs font-black px-3.5 py-1.5 rounded-full bg-[#E63946] hover:bg-[#d32836] text-white shadow-xs transition-all active:scale-95"
+            title="คลิกเพื่อตรวจสอบ App Code & มาตรฐานความปลอดภัย (System & Code Health Audit)"
+          >
+            <ShieldCheck className="w-3.5 h-3.5 text-white" />
+            <span>ตรวจ App Code</span>
+            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+          </button>
+
+          <div className="flex items-center gap-2 text-xs font-bold px-3.5 py-1.5 rounded-full bg-[#A8DADC]/30 text-[#1D3557] border border-[#A8DADC]/80 shadow-xs">
+            <Sparkles className="w-3.5 h-3.5 text-[#E63946]" />
+            <span>สาขาหลัก 00000 (Single Branch Mode)</span>
+          </div>
         </div>
       </div>
 
@@ -224,6 +239,12 @@ export const OwnerDashboard: React.FC = () => {
           </div>
         </div>
       </div>
+
+      {/* System & Code Audit Modal */}
+      <SystemAuditModal
+        isOpen={showAuditModal}
+        onClose={() => setShowAuditModal(false)}
+      />
     </div>
   );
 };

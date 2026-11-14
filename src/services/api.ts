@@ -198,4 +198,7 @@ export const api = {
 
   // Notifications
   getNotifications: () => request<{ success: boolean; data: any[] }>("/notifications"),
+
+  // Live System & Code Audit
+  getSystemAudit: () => request<{ success: boolean; data: any }>("/system/audit"),
 };
