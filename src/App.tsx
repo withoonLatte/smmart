@@ -41,12 +41,12 @@ export function App() {
   // Loading state while verifying token with Cloudflare API
   if (isLoading) {
     return (
-      <div className="h-screen w-screen flex flex-col items-center justify-center bg-[#F8FAFC]">
+      <div className="h-screen w-screen flex flex-col items-center justify-center bg-[#F1FAEE]">
         <div className="flex flex-col items-center gap-3">
-          <div className="w-12 h-12 rounded-2xl bg-blue-600 flex items-center justify-center text-white shadow-lg shadow-blue-500/20">
-            <Loader2 className="w-6 h-6 animate-spin" />
+          <div className="w-12 h-12 rounded-2xl bg-[#1D3557] flex items-center justify-center text-white shadow-lg shadow-[#1D3557]/20">
+            <Loader2 className="w-6 h-6 animate-spin text-[#A8DADC]" />
           </div>
-          <span className="text-xs font-semibold text-slate-500 tracking-wide uppercase">
+          <span className="text-xs font-bold text-[#457B9D] tracking-wide uppercase">
             กำลังตรวจสอบสิทธิ์การเข้าใช้งาน...
           </span>
         </div>
@@ -99,7 +99,7 @@ export function App() {
   };
 
   return (
-    <div className="flex h-screen w-screen overflow-hidden bg-[#F8FAFC]">
+    <div className="flex h-screen w-screen overflow-hidden bg-[#F1FAEE]">
       {/* Collapsible Responsive Sidebar (Hamburger 3 stripes controlled) */}
       <Sidebar
         currentModule={currentModule}

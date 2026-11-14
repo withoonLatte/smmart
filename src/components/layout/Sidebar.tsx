@@ -138,28 +138,28 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentModule, onSelectModule,
       {isOpen && (
         <div
           onClick={onClose}
-          className="fixed inset-0 bg-slate-900/40 backdrop-blur-xs z-40 lg:hidden animate-in fade-in duration-200"
+          className="fixed inset-0 bg-[#1D3557]/50 backdrop-blur-xs z-40 lg:hidden animate-in fade-in duration-200"
           aria-hidden="true"
         />
       )}
 
       {/* Sidebar Drawer */}
       <aside
-        className={`fixed lg:static inset-y-0 left-0 z-50 w-64 bg-white border-r border-slate-200/70 flex flex-col h-screen select-none shrink-0 shadow-2xl lg:shadow-none transition-all duration-300 ease-in-out ${
+        className={`fixed lg:static inset-y-0 left-0 z-50 w-64 bg-white border-r border-[#A8DADC]/40 flex flex-col h-screen select-none shrink-0 shadow-2xl lg:shadow-none transition-all duration-300 ease-in-out ${
           isOpen ? "translate-x-0" : "-translate-x-full lg:-ml-64"
         }`}
       >
         {/* Brand Header */}
-        <div className="p-4 sm:p-5 border-b border-slate-100 flex items-center justify-between">
+        <div className="p-4 sm:p-5 border-b border-[#A8DADC]/30 flex items-center justify-between bg-gradient-to-br from-[#1D3557] to-[#457B9D] text-white">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-2xl bg-gradient-to-tr from-blue-600 to-indigo-500 flex items-center justify-center text-white shadow-md shadow-blue-500/20">
-              <ShoppingCart className="w-5 h-5" />
+            <div className="w-10 h-10 rounded-2xl bg-[#E63946] flex items-center justify-center text-white shadow-md shadow-[#E63946]/30">
+              <ShoppingCart className="w-5 h-5 text-white" />
             </div>
             <div>
-              <h1 className="font-bold text-slate-900 text-base leading-tight tracking-tight">
-                HappyMart
+              <h1 className="font-extrabold text-white text-base leading-tight tracking-tight">
+                HAPPY MART
               </h1>
-              <p className="text-[11px] font-medium text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded-md inline-block mt-0.5">
+              <p className="text-[11px] font-bold text-[#1D3557] bg-[#A8DADC] px-2 py-0.5 rounded-md inline-block mt-1 shadow-xs">
                 ERP v2.0 • สาขาเดี่ยว
               </p>
             </div>
@@ -168,7 +168,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentModule, onSelectModule,
           {/* Close button for mobile & desktop */}
           <button
             onClick={onClose}
-            className="p-1.5 rounded-xl hover:bg-slate-100 text-slate-400 hover:text-slate-700 transition-colors"
+            className="p-1.5 rounded-xl hover:bg-white/20 text-[#A8DADC] hover:text-white transition-colors"
             title="ปิดเมนู (Close menu)"
           >
             <X className="w-5 h-5" />
@@ -176,16 +176,16 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentModule, onSelectModule,
         </div>
 
         {/* Role Badge Banner */}
-        <div className="mx-4 mt-3 p-2.5 rounded-2xl bg-slate-50 border border-slate-200/60 flex items-center gap-2">
-          <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+        <div className="mx-3.5 mt-3 p-2.5 rounded-2xl bg-[#F1FAEE] border border-[#A8DADC]/70 flex items-center gap-2 shadow-xs">
+          <div className="w-2.5 h-2.5 rounded-full bg-[#E63946] animate-pulse" />
           <div className="overflow-hidden">
-            <p className="text-[11px] text-slate-500">บทบาทปัจจุบัน</p>
-            <p className="text-xs font-semibold text-slate-800 truncate">{activeRole}</p>
+            <p className="text-[10px] font-bold text-[#457B9D] uppercase tracking-wider">บทบาทปัจจุบัน</p>
+            <p className="text-xs font-black text-[#1D3557] truncate">{activeRole}</p>
           </div>
         </div>
 
         {/* Navigation List */}
-        <nav className="flex-1 overflow-y-auto px-3 py-4 space-y-1">
+        <nav className="flex-1 overflow-y-auto px-3 py-3 space-y-1">
           {authorizedMenu.map((item) => {
             const Icon = item.icon;
             const isActive = currentModule === item.id;
@@ -198,22 +198,22 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentModule, onSelectModule,
                     onClose();
                   }
                 }}
-                className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-2xl text-xs font-medium transition-all duration-150 ${
+                className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-2xl text-xs font-semibold transition-all duration-150 ${
                   isActive
-                    ? "bg-blue-600 text-white shadow-md shadow-blue-500/25 font-semibold translate-x-1"
-                    : "text-slate-600 hover:text-slate-900 hover:bg-slate-100/80"
+                    ? "bg-[#1D3557] text-[#F1FAEE] shadow-md shadow-[#1D3557]/20 font-bold translate-x-1"
+                    : "text-[#1D3557]/80 hover:text-[#1D3557] hover:bg-[#A8DADC]/20 active:bg-[#A8DADC]/30"
                 }`}
               >
                 <div className="flex items-center gap-3">
-                  <Icon className={`w-4 h-4 ${isActive ? "text-white" : "text-slate-500"}`} />
+                  <Icon className={`w-4 h-4 ${isActive ? "text-[#A8DADC]" : "text-[#457B9D]"}`} />
                   <span>{item.name}</span>
                 </div>
                 {item.badge && (
                   <span
-                    className={`text-[10px] px-1.5 py-0.5 rounded-full font-bold ${
+                    className={`text-[10px] px-2 py-0.5 rounded-full font-black tracking-wide ${
                       isActive
-                        ? "bg-white/20 text-white"
-                        : "bg-slate-200/60 text-slate-600"
+                        ? "bg-[#E63946] text-white shadow-xs"
+                        : "bg-[#A8DADC]/50 text-[#1D3557]"
                     }`}
                   >
                     {item.badge}
@@ -224,15 +224,15 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentModule, onSelectModule,
           })}
 
           {authorizedMenu.length === 0 && (
-            <div className="p-4 text-center text-xs text-slate-400">
-              <ShieldAlert className="w-8 h-8 mx-auto text-amber-500 mb-2 opacity-75" />
+            <div className="p-4 text-center text-xs text-[#457B9D]">
+              <ShieldAlert className="w-8 h-8 mx-auto text-[#E63946] mb-2 opacity-75" />
               ไม่มีสิทธิ์เข้าถึงโมดูลใดๆ
             </div>
           )}
         </nav>
 
         {/* Footer Info */}
-        <div className="p-4 border-t border-slate-100 text-[11px] text-slate-400 text-center">
+        <div className="p-3 border-t border-[#A8DADC]/40 text-[11px] font-semibold text-[#457B9D] text-center bg-[#F1FAEE]/50">
           Cloudflare D1 Remote • APAC
         </div>
       </aside>

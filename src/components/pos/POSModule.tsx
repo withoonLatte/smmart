@@ -580,25 +580,25 @@ export const POSModule: React.FC = () => {
   };
 
   return (
-    <div className="flex flex-col h-[calc(100vh-4rem)] bg-slate-100 overflow-hidden font-sarabun select-none">
+    <div className="flex flex-col h-[calc(100vh-4rem)] bg-[#F1FAEE] overflow-hidden font-linesans select-none">
       {/* ======================================================== */}
       {/* TOP SCANNER & STATUS BAR */}
       {/* ======================================================== */}
-      <div className="h-14 bg-gradient-to-r from-sky-600 via-blue-600 to-indigo-600 px-4 flex items-center justify-between text-white shadow-md z-20 shrink-0">
+      <div className="h-14 bg-gradient-to-r from-[#1D3557] via-[#457B9D] to-[#1D3557] px-4 flex items-center justify-between text-white shadow-md z-20 shrink-0">
         {/* Left: Barcode Scan Field */}
         <form onSubmit={handleBarcodeSubmit} className="flex-1 max-w-xl relative flex items-center">
-          <Barcode className="w-5 h-5 text-white/80 absolute left-3 pointer-events-none" />
+          <Barcode className="w-5 h-5 text-[#A8DADC] absolute left-3 pointer-events-none" />
           <input
             ref={barcodeRef}
             type="text"
             value={barcodeInput}
             onChange={(e) => setBarcodeInput(e.target.value)}
             placeholder="สแกนบาร์โค้ด หรือพิมพ์รหัส/ชื่อสินค้า แล้วกด Enter..."
-            className="w-full pl-10 pr-24 py-2 bg-white/20 border border-white/30 rounded-xl text-white placeholder:text-white/60 text-sm font-semibold focus:outline-none focus:bg-white focus:text-slate-900 focus:ring-2 focus:ring-blue-300 transition-all shadow-inner"
+            className="w-full pl-10 pr-24 py-2 bg-white/15 border border-[#A8DADC]/40 rounded-xl text-white placeholder:text-[#F1FAEE]/60 text-sm font-semibold focus:outline-none focus:bg-white focus:text-[#1D3557] focus:ring-2 focus:ring-[#A8DADC] transition-all shadow-inner"
           />
           <button
             type="submit"
-            className="absolute right-1.5 px-3 py-1 bg-white text-blue-700 text-xs font-bold rounded-lg shadow-sm hover:bg-blue-50 transition-all"
+            className="absolute right-1.5 px-3 py-1 bg-[#E63946] text-white text-xs font-black rounded-lg shadow-sm hover:bg-[#d32836] transition-all"
           >
             ค้นหา
           </button>
@@ -608,9 +608,9 @@ export const POSModule: React.FC = () => {
         <div className="flex items-center gap-3">
           <button
             onClick={() => setShowMemberModal(true)}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white/15 hover:bg-white/25 border border-white/20 text-xs font-semibold text-white transition-all"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white/15 hover:bg-white/25 border border-[#A8DADC]/40 text-xs font-bold text-white transition-all shadow-xs"
           >
-            <User className="w-4 h-4 text-amber-300" />
+            <User className="w-4 h-4 text-[#A8DADC]" />
             <span>
               {selectedCustomer ? `${selectedCustomer.name} (${selectedCustomer.membership_tier} -${selectedCustomer.discount_pct}%)` : "เลือกลูกค้าสมาชิก"}
             </span>
@@ -619,15 +619,15 @@ export const POSModule: React.FC = () => {
           {activeShift ? (
             <button
               onClick={() => setIsShiftModalOpen(true)}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-500 hover:bg-emerald-600 text-xs font-bold text-white shadow-sm transition-all"
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#A8DADC] hover:bg-[#92ced0] text-xs font-black text-[#1D3557] shadow-sm transition-all"
             >
-              <Clock className="w-3.5 h-3.5" />
+              <Clock className="w-3.5 h-3.5 text-[#1D3557]" />
               <span>กะ: {activeShift.shift_code}</span>
             </button>
           ) : (
             <button
               onClick={() => setIsShiftModalOpen(true)}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-amber-500 hover:bg-amber-600 text-xs font-bold text-white shadow-sm transition-all"
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#E63946] hover:bg-[#d32836] text-xs font-black text-white shadow-sm transition-all"
             >
               <AlertCircle className="w-3.5 h-3.5" />
               <span>คลิกเพื่อเปิดกะขาย</span>
@@ -639,14 +639,14 @@ export const POSModule: React.FC = () => {
       {/* ======================================================== */}
       {/* MOBILE TAB SWITCHER (< md) */}
       {/* ======================================================== */}
-      <div className="flex md:hidden bg-slate-100 p-1.5 border-b border-slate-200 gap-1.5 shrink-0">
+      <div className="flex md:hidden bg-[#F1FAEE] p-1.5 border-b border-[#A8DADC]/50 gap-1.5 shrink-0">
         <button
           type="button"
           onClick={() => setMobileTab("cart")}
-          className={`flex-1 py-2 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all ${
+          className={`flex-1 py-2 rounded-xl text-xs font-black flex items-center justify-center gap-1.5 transition-all ${
             mobileTab === "cart"
-              ? "bg-white text-blue-700 shadow-xs"
-              : "text-slate-600 hover:bg-slate-200/60"
+              ? "bg-[#1D3557] text-[#F1FAEE] shadow-xs"
+              : "text-[#1D3557] hover:bg-[#A8DADC]/20"
           }`}
         >
           <ShoppingBag className="w-3.5 h-3.5" />
@@ -655,10 +655,10 @@ export const POSModule: React.FC = () => {
         <button
           type="button"
           onClick={() => setMobileTab("checkout")}
-          className={`flex-1 py-2 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all ${
+          className={`flex-1 py-2 rounded-xl text-xs font-black flex items-center justify-center gap-1.5 transition-all ${
             mobileTab === "checkout"
-              ? "bg-emerald-600 text-white shadow-xs"
-              : "text-slate-600 hover:bg-slate-200/60"
+              ? "bg-[#E63946] text-white shadow-xs"
+              : "text-[#1D3557] hover:bg-[#A8DADC]/20"
           }`}
         >
           <CreditCard className="w-3.5 h-3.5" />
@@ -675,17 +675,17 @@ export const POSModule: React.FC = () => {
         {/* Large readable text for cashiers */}
         {/* ======================================================== */}
         <div
-          className={`w-full md:w-1/2 bg-white flex-col h-full border-r-2 border-slate-300 shadow-sm ${
+          className={`w-full md:w-1/2 bg-white flex-col h-full border-r-2 border-[#A8DADC]/50 shadow-sm ${
             mobileTab === "cart" ? "flex" : "hidden md:flex"
           }`}
         >
           {/* Cart Header */}
-          <div className="px-5 py-3 border-b border-slate-200 flex items-center justify-between bg-slate-50/70">
+          <div className="px-5 py-3 border-b border-[#A8DADC]/40 flex items-center justify-between bg-[#F1FAEE]/60">
             <div>
-              <span className="text-xs font-bold text-slate-500">แคชเชียร์ 01 • สาขาหลัก</span>
-              <h2 className="text-base font-black text-slate-900 tracking-tight flex items-center gap-2">
+              <span className="text-xs font-bold text-[#457B9D]">แคชเชียร์ 01 • สาขาหลัก</span>
+              <h2 className="text-base font-black text-[#1D3557] tracking-tight flex items-center gap-2">
                 <span>Order# {orderNumber}</span>
-                <span className="w-2 h-2 rounded-full bg-blue-500 animate-pulse" />
+                <span className="w-2.5 h-2.5 rounded-full bg-[#E63946] animate-pulse" />
               </h2>
             </div>
 
@@ -693,16 +693,16 @@ export const POSModule: React.FC = () => {
               {heldOrders.length > 0 && (
                 <button
                   onClick={() => setShowHeldModal(true)}
-                  className="px-2.5 py-1 rounded-xl bg-amber-50 border border-amber-300 text-amber-700 text-xs font-bold flex items-center gap-1"
+                  className="px-2.5 py-1 rounded-xl bg-[#A8DADC]/30 border border-[#A8DADC] text-[#1D3557] text-xs font-black flex items-center gap-1 shadow-xs"
                 >
-                  <PauseCircle className="w-3.5 h-3.5" />
+                  <PauseCircle className="w-3.5 h-3.5 text-[#457B9D]" />
                   <span>พักไว้ ({heldOrders.length})</span>
                 </button>
               )}
               {cart.length > 0 && (
                 <button
                   onClick={resetActiveBill}
-                  className="px-2.5 py-1 rounded-xl text-xs font-bold text-rose-600 hover:bg-rose-50 border border-rose-200 transition-all"
+                  className="px-2.5 py-1 rounded-xl text-xs font-bold text-[#E63946] hover:bg-[#E63946]/10 border border-[#E63946]/30 transition-all"
                 >
                   ล้างบิล (Clear)
                 </button>
@@ -711,7 +711,7 @@ export const POSModule: React.FC = () => {
           </div>
 
           {/* Table Header */}
-          <div className="grid grid-cols-12 px-5 py-2.5 bg-slate-100 border-b border-slate-200 text-xs font-bold text-slate-600">
+          <div className="grid grid-cols-12 px-5 py-2.5 bg-[#F1FAEE] border-b border-[#A8DADC]/40 text-xs font-bold text-[#457B9D]">
             <span className="col-span-6">รายการสินค้า (Name)</span>
             <span className="col-span-2 text-center">จำนวน (Qty)</span>
             <span className="col-span-2 text-right">ราคา (Each)</span>
@@ -785,56 +785,56 @@ export const POSModule: React.FC = () => {
           {/* ======================================================== */}
           {/* LEFT BOTTOM: BIG SUMMARY & ACTION BUTTONS */}
           {/* ======================================================== */}
-          <div className="p-4 bg-slate-50 border-t-2 border-slate-200 space-y-2">
+          <div className="p-4 bg-[#F1FAEE] border-t-2 border-[#A8DADC]/60 space-y-2">
             {/* Small stats rows */}
-            <div className="grid grid-cols-2 gap-2 text-xs text-slate-600">
+            <div className="grid grid-cols-2 gap-2 text-xs text-[#457B9D] font-bold">
               <div className="flex justify-between">
                 <span>ยอดรวมสินค้า:</span>
-                <span className="font-bold">฿{rawSubtotal.toFixed(2)}</span>
+                <span className="text-[#1D3557]">฿{rawSubtotal.toFixed(2)}</span>
               </div>
               <div className="flex justify-between">
                 <span>ภาษี (VAT 7% รวมแล้ว):</span>
-                <span className="font-semibold text-slate-500">฿{vatAmount.toFixed(2)}</span>
+                <span className="text-[#457B9D]">฿{vatAmount.toFixed(2)}</span>
               </div>
               {totalDiscount > 0 && (
-                <div className="flex justify-between text-emerald-600 font-bold">
+                <div className="flex justify-between text-[#E63946] font-black">
                   <span>ส่วนลดรวม:</span>
                   <span>-฿{totalDiscount.toFixed(2)}</span>
                 </div>
               )}
             </div>
 
-            {/* GIANT TOTAL BOX (อ่านง่าย ชัดเจน ตรงตามที่ขอ) */}
-            <div className="pt-2 border-t border-slate-200 flex items-baseline justify-between">
+            {/* GIANT TOTAL BOX */}
+            <div className="pt-2 border-t border-[#A8DADC]/40 flex items-baseline justify-between">
               <div>
-                <span className="text-xs font-bold text-slate-500 uppercase tracking-wider block">
+                <span className="text-xs font-black text-[#457B9D] uppercase tracking-wider block">
                   ยอดสุทธิที่ต้องชำระ (TOTAL)
                 </span>
-                <span className="text-sm font-semibold text-slate-600">
+                <span className="text-sm font-bold text-[#1D3557]">
                   {cart.reduce((s, i) => s + i.quantity, 0)} รายการ
                 </span>
               </div>
-              <div className="text-4xl font-black text-blue-700 tracking-tight">
+              <div className="text-4xl font-black text-[#1D3557] tracking-tight">
                 ฿{grandTotal.toFixed(2)}
               </div>
             </div>
 
             {/* Quick Action Ribbon */}
-            <div className="grid grid-cols-4 gap-2 pt-2 border-t border-slate-200">
+            <div className="grid grid-cols-4 gap-2 pt-2 border-t border-[#A8DADC]/40">
               <button
                 onClick={handleHoldOrder}
                 disabled={cart.length === 0}
-                className="py-2 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 font-bold text-xs text-slate-700 flex items-center justify-center gap-1 shadow-sm disabled:opacity-50"
+                className="py-2.5 rounded-2xl border border-[#A8DADC] bg-white hover:bg-[#A8DADC]/20 font-bold text-xs text-[#1D3557] flex items-center justify-center gap-1 shadow-xs disabled:opacity-50"
               >
-                <PauseCircle className="w-3.5 h-3.5 text-amber-500" />
+                <PauseCircle className="w-3.5 h-3.5 text-[#457B9D]" />
                 <span>พักบิล (Hold)</span>
               </button>
 
               <button
                 onClick={() => setShowMemberModal(true)}
-                className="py-2 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 font-bold text-xs text-slate-700 flex items-center justify-center gap-1 shadow-sm"
+                className="py-2.5 rounded-2xl border border-[#457B9D]/40 bg-white hover:bg-[#457B9D]/10 font-bold text-xs text-[#457B9D] flex items-center justify-center gap-1 shadow-xs"
               >
-                <Percent className="w-3.5 h-3.5 text-indigo-500" />
+                <Percent className="w-3.5 h-3.5 text-[#457B9D]" />
                 <span>ส่วนลด/สมาชิก</span>
               </button>
 
@@ -843,16 +843,16 @@ export const POSModule: React.FC = () => {
                   setShowRecentSalesModal(true);
                   loadData();
                 }}
-                className="py-2 rounded-xl border border-blue-200 bg-blue-50/70 hover:bg-blue-100 font-bold text-xs text-blue-700 flex items-center justify-center gap-1 shadow-sm transition-all"
+                className="py-2.5 rounded-2xl border border-[#1D3557]/30 bg-[#1D3557]/10 hover:bg-[#1D3557]/20 font-bold text-xs text-[#1D3557] flex items-center justify-center gap-1 shadow-xs transition-all"
               >
-                <Receipt className="w-3.5 h-3.5 text-blue-600" />
+                <Receipt className="w-3.5 h-3.5 text-[#1D3557]" />
                 <span>บิลล่าสุด / จัดการ</span>
               </button>
 
               <button
                 onClick={resetActiveBill}
                 disabled={cart.length === 0}
-                className="py-2 rounded-xl border border-rose-200 bg-rose-50/60 hover:bg-rose-100 font-bold text-xs text-rose-700 flex items-center justify-center gap-1 disabled:opacity-50"
+                className="py-2.5 rounded-2xl border border-[#E63946]/30 bg-[#E63946]/10 hover:bg-[#E63946]/20 font-bold text-xs text-[#E63946] flex items-center justify-center gap-1 disabled:opacity-50"
               >
                 <Trash2 className="w-3.5 h-3.5" />
                 <span>ยกเลิกบิล</span>
@@ -864,7 +864,7 @@ export const POSModule: React.FC = () => {
               <button
                 onClick={() => setMobileTab("checkout")}
                 disabled={cart.length === 0}
-                className="w-full py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold text-xs shadow-md shadow-emerald-600/20 flex items-center justify-center gap-1.5 disabled:opacity-50"
+                className="w-full py-3 rounded-2xl bg-[#E63946] hover:bg-[#d32836] text-white font-black text-xs shadow-md shadow-[#E63946]/20 flex items-center justify-center gap-1.5 disabled:opacity-50"
               >
                 <span>ไปที่หน้าชำระเงิน (฿{grandTotal.toFixed(2)})</span>
                 <ArrowRight className="w-4 h-4" />
@@ -878,34 +878,34 @@ export const POSModule: React.FC = () => {
         {/* Exactly styled after Revel iPad POS layout */}
         {/* ======================================================== */}
         <div
-          className={`w-full md:w-1/2 bg-slate-50 flex-col h-full p-3 sm:p-4 justify-between overflow-y-auto ${
+          className={`w-full md:w-1/2 bg-[#F1FAEE] flex-col h-full p-3 sm:p-4 justify-between overflow-y-auto ${
             mobileTab === "checkout" ? "flex" : "hidden md:flex"
           }`}
         >
           {/* Top 3 Stat Displays */}
           <div className="grid grid-cols-3 gap-3 mb-3">
             {/* Balance Due */}
-            <div className="bg-white p-3 rounded-2xl border border-slate-200 shadow-sm">
-              <span className="text-[11px] font-bold text-slate-400 block">Balance Due (ยอดชำระ)</span>
-              <div className="text-xl font-black text-blue-700 mt-0.5 truncate">
+            <div className="bg-white p-3 rounded-2xl border border-[#A8DADC]/70 shadow-xs">
+              <span className="text-[11px] font-bold text-[#457B9D] block">Balance Due (ยอดชำระ)</span>
+              <div className="text-xl font-black text-[#E63946] mt-0.5 truncate">
                 ฿{grandTotal.toFixed(2)}
               </div>
             </div>
 
             {/* Amount Tendered (รับเงินมา) */}
-            <div className="bg-white p-3 rounded-2xl border-2 border-blue-500 shadow-sm relative">
-              <span className="text-[11px] font-bold text-blue-600 block">Amount Tendered (รับมา)</span>
-              <div className="text-xl font-black text-slate-900 mt-0.5 truncate">
+            <div className="bg-white p-3 rounded-2xl border-2 border-[#457B9D] shadow-xs relative">
+              <span className="text-[11px] font-bold text-[#457B9D] block">Amount Tendered (รับมา)</span>
+              <div className="text-xl font-black text-[#1D3557] mt-0.5 truncate">
                 {tenderedInput ? `฿${Number(tenderedInput).toFixed(2)}` : "฿0.00"}
               </div>
             </div>
 
             {/* Change Due (เงินทอน) */}
-            <div className="bg-white p-3 rounded-2xl border border-slate-200 shadow-sm">
-              <span className="text-[11px] font-bold text-slate-400 block">Change (เงินทอน)</span>
+            <div className="bg-white p-3 rounded-2xl border border-[#A8DADC]/70 shadow-xs">
+              <span className="text-[11px] font-bold text-[#457B9D] block">Change (เงินทอน)</span>
               <div
                 className={`text-xl font-black mt-0.5 truncate ${
-                  isSufficient && tenderedNumber > 0 ? "text-emerald-600" : "text-slate-400"
+                  isSufficient && tenderedNumber > 0 ? "text-[#1D3557]" : "text-[#457B9D]/50"
                 }`}
               >
                 ฿{changeDue.toFixed(2)}
@@ -917,49 +917,49 @@ export const POSModule: React.FC = () => {
           <div className="grid grid-cols-4 gap-2 mb-3">
             <button
               onClick={() => setPaymentMethod("cash")}
-              className={`py-2 px-3 rounded-2xl border text-xs font-bold flex items-center justify-center gap-1.5 transition-all shadow-sm ${
+              className={`py-2 px-3 rounded-2xl border text-xs font-bold flex items-center justify-center gap-1.5 transition-all shadow-xs ${
                 paymentMethod === "cash"
-                  ? "bg-blue-600 text-white border-blue-600 shadow-blue-500/20"
-                  : "bg-white text-slate-700 border-slate-200 hover:bg-slate-100"
+                  ? "bg-[#1D3557] text-[#F1FAEE] border-[#1D3557] shadow-[#1D3557]/20"
+                  : "bg-white text-[#1D3557] border-[#A8DADC]/60 hover:bg-[#F1FAEE]"
               }`}
             >
-              <Banknote className="w-4 h-4 text-emerald-500" />
+              <Banknote className="w-4 h-4 text-[#A8DADC]" />
               <span>เงินสด (Cash)</span>
             </button>
 
             <button
               onClick={() => setPaymentMethod("promptpay")}
-              className={`py-2 px-3 rounded-2xl border text-xs font-bold flex items-center justify-center gap-1.5 transition-all shadow-sm ${
+              className={`py-2 px-3 rounded-2xl border text-xs font-bold flex items-center justify-center gap-1.5 transition-all shadow-xs ${
                 paymentMethod === "promptpay"
-                  ? "bg-blue-600 text-white border-blue-600 shadow-blue-500/20"
-                  : "bg-white text-slate-700 border-slate-200 hover:bg-slate-100"
+                  ? "bg-[#1D3557] text-[#F1FAEE] border-[#1D3557] shadow-[#1D3557]/20"
+                  : "bg-white text-[#1D3557] border-[#A8DADC]/60 hover:bg-[#F1FAEE]"
               }`}
             >
-              <QrCode className="w-4 h-4 text-blue-400" />
+              <QrCode className="w-4 h-4 text-[#A8DADC]" />
               <span>พร้อมเพย์ QR</span>
             </button>
 
             <button
               onClick={() => setPaymentMethod("card")}
-              className={`py-2 px-3 rounded-2xl border text-xs font-bold flex items-center justify-center gap-1.5 transition-all shadow-sm ${
+              className={`py-2 px-3 rounded-2xl border text-xs font-bold flex items-center justify-center gap-1.5 transition-all shadow-xs ${
                 paymentMethod === "card"
-                  ? "bg-blue-600 text-white border-blue-600 shadow-blue-500/20"
-                  : "bg-white text-slate-700 border-slate-200 hover:bg-slate-100"
+                  ? "bg-[#1D3557] text-[#F1FAEE] border-[#1D3557] shadow-[#1D3557]/20"
+                  : "bg-white text-[#1D3557] border-[#A8DADC]/60 hover:bg-[#F1FAEE]"
               }`}
             >
-              <CreditCard className="w-4 h-4 text-purple-400" />
+              <CreditCard className="w-4 h-4 text-[#A8DADC]" />
               <span>บัตรเครดิต</span>
             </button>
 
             <button
               onClick={() => setPaymentMethod("transfer")}
-              className={`py-2 px-3 rounded-2xl border text-xs font-bold flex items-center justify-center gap-1.5 transition-all shadow-sm ${
+              className={`py-2 px-3 rounded-2xl border text-xs font-bold flex items-center justify-center gap-1.5 transition-all shadow-xs ${
                 paymentMethod === "transfer"
-                  ? "bg-blue-600 text-white border-blue-600 shadow-blue-500/20"
-                  : "bg-white text-slate-700 border-slate-200 hover:bg-slate-100"
+                  ? "bg-[#1D3557] text-[#F1FAEE] border-[#1D3557] shadow-[#1D3557]/20"
+                  : "bg-white text-[#1D3557] border-[#A8DADC]/60 hover:bg-[#F1FAEE]"
               }`}
             >
-              <Coins className="w-4 h-4 text-amber-500" />
+              <Coins className="w-4 h-4 text-[#A8DADC]" />
               <span>โอนเงิน</span>
             </button>
           </div>
@@ -967,28 +967,28 @@ export const POSModule: React.FC = () => {
           {/* Interactive Middle Area: Numpad OR PromptPay QR */}
           {paymentMethod === "promptpay" ? (
             /* PromptPay Instant QR Display (Rule #3) */
-            <div className="bg-white rounded-3xl p-5 border border-slate-200 shadow-sm flex flex-col items-center justify-center mb-3">
-              <span className="text-xs font-bold text-slate-700 mb-2">
+            <div className="bg-white rounded-3xl p-5 border border-[#A8DADC]/60 shadow-xs flex flex-col items-center justify-center mb-3">
+              <span className="text-xs font-bold text-[#1D3557] mb-2">
                 สแกนจ่ายผ่าน PromptPay QR (Instant Render)
               </span>
               {storeProfile?.promptpay_id ? (
                 promptPayQR?.qrDataUrl ? (
-                  <div className="p-3 bg-white rounded-2xl border-2 border-blue-100 shadow-inner">
+                  <div className="p-3 bg-white rounded-2xl border-2 border-[#A8DADC] shadow-inner">
                     <img src={promptPayQR.qrDataUrl} alt="PromptPay" className="w-44 h-44" />
                   </div>
                 ) : (
-                  <div className="w-44 h-44 bg-slate-100 rounded-2xl animate-pulse" />
+                  <div className="w-44 h-44 bg-[#F1FAEE] rounded-2xl animate-pulse" />
                 )
               ) : (
-                <div className="p-6 text-center text-xs text-amber-700 bg-amber-50 rounded-2xl border border-amber-200">
-                  <AlertCircle className="w-8 h-8 text-amber-600 mx-auto mb-2" />
+                <div className="p-6 text-center text-xs text-[#E63946] bg-[#E63946]/10 rounded-2xl border border-[#E63946]/30">
+                  <AlertCircle className="w-8 h-8 text-[#E63946] mx-auto mb-2" />
                   ยังไม่ได้กำหนดเลขพร้อมเพย์ร้านค้า กรุณาระบุในเมนู "ตั้งค่าระบบ &gt; ข้อมูลร้านค้า"
                 </div>
               )}
-              <div className="mt-2 text-2xl font-black text-blue-700">
+              <div className="mt-2 text-2xl font-black text-[#1D3557]">
                 ฿{grandTotal.toFixed(2)}
               </div>
-              <span className="text-[11px] text-slate-400 mt-0.5">
+              <span className="text-[11px] text-[#457B9D] mt-0.5 font-semibold">
                 {storeProfile?.promptpay_id ? `พร้อมเพย์ร้านค้า: ${storeProfile.promptpay_id}` : "รอการตั้งค่า"}
               </span>
             </div>
@@ -1000,14 +1000,14 @@ export const POSModule: React.FC = () => {
                 <button
                   key={n}
                   onClick={() => handleNumpadPress(n)}
-                  className="h-14 rounded-2xl bg-white hover:bg-slate-100 active:scale-95 border border-slate-200 text-2xl font-bold text-slate-800 shadow-sm transition-all"
+                  className="h-14 rounded-2xl bg-white hover:bg-[#F1FAEE] active:scale-95 border border-[#A8DADC]/50 text-2xl font-bold text-[#1D3557] shadow-xs transition-all"
                 >
                   {n}
                 </button>
               ))}
               <button
                 onClick={() => handleAddDenomination(50)}
-                className="h-14 rounded-2xl bg-sky-500 hover:bg-sky-600 active:scale-95 text-white font-black text-base shadow-sm transition-all flex flex-col items-center justify-center leading-none"
+                className="h-14 rounded-2xl bg-[#A8DADC] hover:bg-[#96cbcc] active:scale-95 text-[#1D3557] font-black text-base shadow-xs transition-all flex flex-col items-center justify-center leading-none"
               >
                 <span>+฿50</span>
               </button>
@@ -1017,14 +1017,14 @@ export const POSModule: React.FC = () => {
                 <button
                   key={n}
                   onClick={() => handleNumpadPress(n)}
-                  className="h-14 rounded-2xl bg-white hover:bg-slate-100 active:scale-95 border border-slate-200 text-2xl font-bold text-slate-800 shadow-sm transition-all"
+                  className="h-14 rounded-2xl bg-white hover:bg-[#F1FAEE] active:scale-95 border border-[#A8DADC]/50 text-2xl font-bold text-[#1D3557] shadow-xs transition-all"
                 >
                   {n}
                 </button>
               ))}
               <button
                 onClick={() => handleAddDenomination(100)}
-                className="h-14 rounded-2xl bg-blue-500 hover:bg-blue-600 active:scale-95 text-white font-black text-base shadow-sm transition-all flex flex-col items-center justify-center leading-none"
+                className="h-14 rounded-2xl bg-[#457B9D] hover:bg-[#396783] active:scale-95 text-white font-black text-base shadow-xs transition-all flex flex-col items-center justify-center leading-none"
               >
                 <span>+฿100</span>
               </button>
@@ -1034,14 +1034,14 @@ export const POSModule: React.FC = () => {
                 <button
                   key={n}
                   onClick={() => handleNumpadPress(n)}
-                  className="h-14 rounded-2xl bg-white hover:bg-slate-100 active:scale-95 border border-slate-200 text-2xl font-bold text-slate-800 shadow-sm transition-all"
+                  className="h-14 rounded-2xl bg-white hover:bg-[#F1FAEE] active:scale-95 border border-[#A8DADC]/50 text-2xl font-bold text-[#1D3557] shadow-xs transition-all"
                 >
                   {n}
                 </button>
               ))}
               <button
                 onClick={() => handleAddDenomination(500)}
-                className="h-14 rounded-2xl bg-indigo-600 hover:bg-indigo-700 active:scale-95 text-white font-black text-base shadow-sm transition-all flex flex-col items-center justify-center leading-none"
+                className="h-14 rounded-2xl bg-[#1D3557] hover:bg-[#15263F] active:scale-95 text-[#F1FAEE] font-black text-base shadow-xs transition-all flex flex-col items-center justify-center leading-none"
               >
                 <span>+฿500</span>
               </button>
@@ -1049,25 +1049,25 @@ export const POSModule: React.FC = () => {
               {/* Row 4 */}
               <button
                 onClick={() => handleNumpadPress("C")}
-                className="h-14 rounded-2xl bg-slate-200 hover:bg-slate-300 active:scale-95 text-slate-700 font-black text-xl shadow-sm transition-all"
+                className="h-14 rounded-2xl bg-[#A8DADC]/30 hover:bg-[#A8DADC]/50 active:scale-95 text-[#1D3557] font-black text-xl shadow-xs transition-all"
               >
                 C
               </button>
               <button
                 onClick={() => handleNumpadPress("0")}
-                className="h-14 rounded-2xl bg-white hover:bg-slate-100 active:scale-95 border border-slate-200 text-2xl font-bold text-slate-800 shadow-sm transition-all"
+                className="h-14 rounded-2xl bg-white hover:bg-[#F1FAEE] active:scale-95 border border-[#A8DADC]/50 text-2xl font-bold text-[#1D3557] shadow-xs transition-all"
               >
                 0
               </button>
               <button
                 onClick={() => handleNumpadPress(".")}
-                className="h-14 rounded-2xl bg-white hover:bg-slate-100 active:scale-95 border border-slate-200 text-2xl font-bold text-slate-800 shadow-sm transition-all"
+                className="h-14 rounded-2xl bg-white hover:bg-[#F1FAEE] active:scale-95 border border-[#A8DADC]/50 text-2xl font-bold text-[#1D3557] shadow-xs transition-all"
               >
                 .
               </button>
               <button
                 onClick={() => handleAddDenomination(1000)}
-                className="h-14 rounded-2xl bg-slate-800 hover:bg-slate-900 active:scale-95 text-white font-black text-base shadow-sm transition-all flex flex-col items-center justify-center leading-none"
+                className="h-14 rounded-2xl bg-[#E63946] hover:bg-[#d32836] active:scale-95 text-white font-black text-base shadow-xs transition-all flex flex-col items-center justify-center leading-none"
               >
                 <span>+฿1,000</span>
               </button>
@@ -1075,15 +1075,15 @@ export const POSModule: React.FC = () => {
               {/* Row 5: Backspace & Exact Cash */}
               <button
                 onClick={() => handleNumpadPress("BACK")}
-                className="col-span-2 h-12 rounded-2xl bg-slate-200 hover:bg-slate-300 text-slate-700 font-bold text-sm shadow-sm flex items-center justify-center gap-1"
+                className="col-span-2 h-12 rounded-2xl bg-[#A8DADC]/30 hover:bg-[#A8DADC]/50 text-[#1D3557] font-bold text-sm shadow-xs flex items-center justify-center gap-1"
               >
-                <Delete className="w-4 h-4" />
+                <Delete className="w-4 h-4 text-[#1D3557]" />
                 <span>ลบ (Backspace)</span>
               </button>
 
               <button
                 onClick={handleExactCash}
-                className="col-span-2 h-12 rounded-2xl bg-emerald-50 border-2 border-emerald-500 hover:bg-emerald-100 text-emerald-800 font-black text-sm shadow-sm"
+                className="col-span-2 h-12 rounded-2xl bg-[#F1FAEE] border-2 border-[#457B9D] hover:bg-[#A8DADC]/30 text-[#1D3557] font-black text-sm shadow-xs"
               >
                 จ่ายพอดี (Exact ฿{grandTotal.toFixed(2)})
               </button>
@@ -1098,7 +1098,7 @@ export const POSModule: React.FC = () => {
             onClick={handleCompleteSale}
             className={`w-full py-4 rounded-3xl font-black text-lg flex items-center justify-center gap-2 shadow-lg transition-all ${
               cart.length > 0 && !isProcessingCheckout && (paymentMethod !== "cash" || isSufficient)
-                ? "bg-gradient-to-r from-blue-600 via-indigo-600 to-blue-700 hover:from-blue-700 hover:to-indigo-800 text-white shadow-blue-500/25 active:scale-[0.99]"
+                ? "bg-gradient-to-r from-[#E63946] via-[#457B9D] to-[#1D3557] hover:opacity-95 text-white shadow-[#1D3557]/20 active:scale-[0.99]"
                 : "bg-slate-300 text-slate-500 cursor-not-allowed"
             }`}
           >
