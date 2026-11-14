@@ -14,6 +14,7 @@ import {
   BarChart3,
   Settings,
   ShieldAlert,
+  Scan,
 } from "lucide-react";
 import { useAuthStore } from "@/store/useAuthStore";
 import { RoleCode } from "@/types";
@@ -63,6 +64,13 @@ const MENU_ITEMS: MenuItem[] = [
     icon: ClipboardCheck,
     allowedRoles: ["OWNER_ADMIN", "MANAGER", "STOCK_CHECKER"],
     badge: "App",
+  },
+  {
+    id: "stock-scanner",
+    name: "สแกนตรวจสต๊อก (Mobile Scanner)",
+    icon: Scan,
+    allowedRoles: ["OWNER_ADMIN", "MANAGER", "STOCK_CHECKER", "WAREHOUSE"],
+    badge: "Scan",
   },
   {
     id: "warehouse",

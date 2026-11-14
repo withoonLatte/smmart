@@ -6,6 +6,7 @@ import { OwnerDashboard } from "@/components/dashboard/OwnerDashboard";
 import { ProductModule } from "@/components/products/ProductModule";
 import { InventoryModule } from "@/components/inventory/InventoryModule";
 import { StockCountModule } from "@/components/stock-count/StockCountModule";
+import { StockScannerModule } from "@/components/stock-checker/StockScannerModule";
 import { WarehouseModule } from "@/components/warehouse/WarehouseModule";
 import { PurchasingModule } from "@/components/purchasing/PurchasingModule";
 import { SupplierModule } from "@/components/suppliers/SupplierModule";
@@ -38,6 +39,8 @@ export function App() {
         return <InventoryModule />;
       case "stock-count":
         return <StockCountModule />;
+      case "stock-scanner":
+        return <StockScannerModule />;
       case "warehouse":
         return <WarehouseModule />;
       case "purchasing":
