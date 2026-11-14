@@ -1,0 +1,8 @@
+name = "smmart"
+compatibility_date = "2024-11-01"
+pages_build_output_dir = "./dist"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "smmart-erp-db"
+database_id = "1a95a057-79db-409f-a6a0-763c7909c0f4"
