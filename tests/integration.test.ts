@@ -321,13 +321,82 @@ describe("Production D1 Database & API Integration Tests", () => {
     expect(mgrApproveRes.status).toBe(200);
     expect(mgrApproveRes.data.success).toBe(true);
 
-    // Attempt duplicate approval -> Rejected with ALREADY_APPROVED
+    // Attempt duplicate approval -> Rejected with ALREADY_APPROVED (HTTP 409 Concurrency Guard)
     const dupRes = await makeReq(`/api/stock-count/tasks/${taskId}/approve`, {
       method: "POST",
       token: managerToken,
     });
-    expect(dupRes.status).toBe(400);
+    expect([400, 409]).toContain(dupRes.status);
     expect(dupRes.data.error).toBe("ALREADY_APPROVED");
+  });
+
+  it("should enforce authentication on all catalog and inventory endpoints (Least Privilege)", async () => {
+    // Unauthenticated requests MUST return 401 Unauthorized
+    const catRes = await makeReq("/api/categories");
+    expect(catRes.status).toBe(401);
+
+    const brandRes = await makeReq("/api/brands");
+    expect(brandRes.status).toBe(401);
+
+    const locRes = await makeReq("/api/inventory/locations");
+    expect(locRes.status).toBe(401);
+
+    const prodRes = await makeReq("/api/products");
+    expect(prodRes.status).toBe(401);
+  });
+
+  it("should automatically synchronize products.current_stock via database triggers", async () => {
+    // Query initial current_stock of p_water
+    const initialWater = await db.prepare("SELECT current_stock FROM products WHERE id = 'p_water'").first();
+    expect(initialWater.current_stock).toBe(336); // 96 + 240
+
+    // Add 50 units to inventory in loc_shelf
+    await db.prepare("UPDATE inventory SET quantity = quantity + 50 WHERE id = 'inv_1'").run();
+
+    // Trigger trg_sync_inventory_update automatically recalculated products.current_stock!
+    const updatedWater = await db.prepare("SELECT current_stock FROM products WHERE id = 'p_water'").first();
+    expect(updatedWater.current_stock).toBe(386); // 336 + 50
+  });
+
+  it("should roll back entire POS batch atomically when shelf stock is insufficient", async () => {
+    const cashierToken = "cashier_token_atomic_test";
+    await db.prepare(
+      `INSERT INTO user_sessions (id, user_id, token, role_code, expires_at)
+       VALUES ('sess_cashier_atomic', 'emp_cashier1', ?, 'CASHIER', datetime('now', '+7 days'))`
+    ).bind(cashierToken).run();
+    await db.prepare("UPDATE employees SET force_password_change = 0 WHERE id = 'emp_cashier1'").run();
+
+    const shiftId = "shift_atomic_103";
+    await db.prepare(
+      `INSERT INTO cashier_shifts (id, shift_code, cashier_id, cashier_name, opening_cash, status)
+       VALUES (?, 'SH-103', 'emp_cashier1', 'คุณนภา ขายคล่อง', 1000, 'open')`
+    ).bind(shiftId).run();
+
+    // Set p_lays shelf quantity to 2
+    await db.prepare("UPDATE inventory SET quantity = 2 WHERE product_id = 'p_lays' AND location_id = 'loc_shelf'").run();
+
+    // Attempt to sell 5 units (exceeds 2)
+    const oversellRes = await makeReq("/api/pos/checkout", {
+      method: "POST",
+      token: cashierToken,
+      idempotencyKey: "bill_uuid_atomic_rollback",
+      body: {
+        shift_id: shiftId,
+        items: [{ product_id: "p_lays", quantity: 5 }],
+        payment_method: "cash",
+        received_amount: 500,
+      },
+    });
+
+    expect([400, 409]).toContain(oversellRes.status);
+
+    // CRITICAL: Ensure NO sale record was inserted into the sales table!
+    const saleInDb = await db.prepare("SELECT * FROM sales WHERE cashier_id = 'emp_cashier1' AND subtotal > 100").all();
+    expect(saleInDb.results.length).toBe(0);
+
+    // Inventory remains untouched at 2
+    const remainingLays = await db.prepare("SELECT quantity FROM inventory WHERE product_id = 'p_lays' AND location_id = 'loc_shelf'").first();
+    expect(remainingLays.quantity).toBe(2);
   });
 
   it("should enforce cashier shift isolation (cashier cannot view other cashier sales)", async () => {

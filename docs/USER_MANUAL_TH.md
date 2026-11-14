@@ -219,12 +219,22 @@ npx wrangler d1 execute smmart-erp-db --remote --file=backups/smmart-backup-YYYY
   - `POST /api/auth/logout` (ออกจากระบบ)
 - รหัสผ่านใหม่ต้องมีความยาวอย่างน้อย 8 ตัวอักษร มีตัวพิมพ์ใหญ่ ตัวพิมพ์เล็ก และตัวเลข
 
-### 5.2 มาตรการป้องกัน Brute Force & Rate Limiting
-- ระบบจะบันทึกประวัติการล็อกอินในตาราง `login_attempts`
-- หากมีการล็อกอินผิดติดต่อกัน 5 ครั้งภายใน 15 นาที ระบบจะตัดการเชื่อมต่อและส่งรหัส **HTTP 429 Too Many Requests** ทันที เพื่อป้องกันการสุ่มรหัสผ่าน
+### 5.2 มาตรการป้องกัน Brute Force & Rate Limiting (Decoupled Thresholds)
+- ระบบบันทึกประวัติความพยายามเข้าสู่ระบบในตาราง `login_attempts`
+- แยกเกณฑ์การตรวจสอบอย่างอิสระเพื่อความปลอดภัยสูงสุดและไม่กระทบผู้ใช้งานคนอื่นในเครือข่ายเดียวกัน:
+  - **เกณฑ์ระดับบัญชี (Per-Username):** ล็อกอินผิดติดต่อกัน 5 ครั้งใน 15 นาที ระบบจะส่งรหัส **HTTP 429 `RATE_LIMITED`** เพื่อป้องกันการสุ่มเดารหัสผ่านของบัญชีนั้น
+  - **เกณฑ์ระดับเครือข่าย (Per-IP):** ล็อกอินผิดเกิน 20 ครั้งใน 15 นาที ระบบจะส่งรหัส **HTTP 429 `RATE_LIMITED`** เพื่อป้องกัน Distributed Brute Force โดยไม่บล็อกพนักงานคนอื่นที่แชร์ Wi-Fi หรือเราเตอร์เครื่องเดียวกันในร้าน
 
-### 5.3 หมายเหตุเรื่อง GitHub Token & Workflows
+### 5.3 ความเป็นอันหนึ่งอันเดียวกันของธุรกรรมระดับฐานข้อมูล (True D1 Atomicity & Triggers)
+- **POS Checkout Rollback:** ทำงานร่วมกับ SQLite Trigger `trg_prevent_negative_inventory` หากสต๊อกติดลบ SQLite จะสั่ง `RAISE(ABORT)` ย้อนคืน (Rollback) บิลขาย รายการสินค้า และประวัติการเคลื่อนไหวทั้งหมดใน Batch อัตโนมัติในระดับ Database Engine
+- **Stock Count Anti-Double Approval:** ทำงานร่วมกับ Trigger `trg_stock_count_approve_guard` หากใบงานถูกอนุมัติไปแล้ว คำสั่งอนุมัติซ้ำจะสั่ง `RAISE(ABORT)` และยกเลิกการปรับสต๊อกทั้งหมดทันที ป้องกันการนับเบิ้ล 100%
+- **Mathematical Stock Synchronization:** ควบคุมด้วย Triggers `trg_sync_inventory_insert`, `trg_sync_inventory_update`, `trg_sync_inventory_delete` คอยคำนวณ `products.current_stock` ให้ตรงกับผลรวมของ `inventory.quantity` ทุกคลังในทุกการเปลี่ยนแปลงแบบเรียลไทม์
+
+### 5.4 หมายเหตุเรื่อง GitHub Token & Workflows
 - **GitHub Personal Access Token (PAT):**
-  - ในปัจจุบัน Token ที่ใช้เชื่อมต่อ Repository อาจไม่มีสิทธิ์ `workflow` scope
-  - หากระบบพยายาม Push หรือแก้ไขไฟล์ในไดเรกทอรี `.github/workflows/` GitHub จะปฏิเสธการดำเนินการด้วยข้อความ `refusing to allow a Personal Access Token to create or update workflow`
-  - หากต้องการเปิดใช้งาน GitHub Actions อัตโนมัติ ให้เข้าไปที่ **GitHub Settings -> Developer settings -> Personal access tokens** แล้วติ๊กเปิดสิทธิ์ `workflow` สำหรับ Token นั้น
+  - Token ในปัจจุบันขาดสิทธิ์ `workflow` scope ทางเซิร์ฟเวอร์ GitHub จึงปฏิเสธคำสั่ง Push ไฟล์ใดๆ ใน `.github/workflows/`
+  - **วิธีเปิดใช้งาน CI/CD:**
+    1. ไปที่ GitHub: **Settings -> Developer settings -> Personal access tokens (classic)**
+    2. คลิกเลือก Token ที่ใช้งานอยู่
+    3. ติ๊กเครื่องหมายถูกที่ช่อง **`workflow` (Update GitHub Action workflows)**
+    4. กดปุ่ม **Update token** ด้านล่างสุด จากนั้นไฟล์ `.github/workflows/ci.yml` จะสามารถ Push ขึ้นสู่ระบบเพื่อรัน Actions ได้ทันที

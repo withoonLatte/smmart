@@ -211,6 +211,29 @@ function requirePermission(permissionCode: string) {
   };
 }
 
+function requireAnyPermission(...permissions: string[]) {
+  return async (c: any, next: any) => {
+    const user: AuthUser | undefined = c.get("user");
+    if (!user) {
+      return c.json({ success: false, error: "Unauthorized" }, 401);
+    }
+
+    const hasPerm =
+      user.role_code === "OWNER_ADMIN" ||
+      user.permissions.includes("*") ||
+      permissions.some(p => user.permissions.includes(p));
+
+    if (!hasPerm) {
+      return c.json({
+        success: false,
+        error: `ปฏิเสธการเข้าถึง: บัญชีของคุณไม่มีสิทธิ์ดำเนินการในส่วนนี้ (${permissions.join(", ")})`,
+      }, 403);
+    }
+
+    await next();
+  };
+}
+
 function requireOwnerOnly() {
   return async (c: any, next: any) => {
     const user: AuthUser | undefined = c.get("user");
@@ -233,20 +256,32 @@ app.post("/auth/login", async (c) => {
     return c.json({ success: false, error: "กรุณาระบุชื่อผู้ใช้และรหัสผ่าน" }, 400);
   }
 
-  // Rate Limiting & Brute Force Prevention (Max 5 failed attempts in 15 minutes)
+  // Rate Limiting & Brute Force Prevention (Decoupled per-username and per-IP thresholds)
+  // 5 fails per username prevents password guessing; 20 fails per IP prevents distributed brute force without locking entire shared network
   try {
-    const recentFails: any = await db.prepare(
+    const userFails: any = await db.prepare(
       `SELECT COUNT(*) as fail_count FROM login_attempts 
-       WHERE (ip_address = ? OR username = ?) 
-         AND success = 0 
-         AND attempted_at > datetime('now', '-15 minutes')`
-    ).bind(ip, username).first();
+       WHERE username = ? AND success = 0 AND attempted_at > datetime('now', '-15 minutes')`
+    ).bind(username).first();
 
-    if (recentFails && recentFails.fail_count >= 5) {
+    if (userFails && userFails.fail_count >= 5) {
       return c.json({
         success: false,
         error: "RATE_LIMITED",
-        message: "คุณพยายามเข้าสู่ระบบผิดพลาดเกินกำหนด (5 ครั้ง) กรุณารอ 15 นาที หรือติดต่อผู้ดูแลระบบ",
+        message: "บัญชีนี้พยายามเข้าสู่ระบบผิดพลาดเกินกำหนด (5 ครั้ง) กรุณารอ 15 นาที เพื่อความปลอดภัย",
+      }, 429);
+    }
+
+    const ipFails: any = await db.prepare(
+      `SELECT COUNT(*) as fail_count FROM login_attempts 
+       WHERE ip_address = ? AND success = 0 AND attempted_at > datetime('now', '-15 minutes')`
+    ).bind(ip).first();
+
+    if (ipFails && ipFails.fail_count >= 20) {
+      return c.json({
+        success: false,
+        error: "RATE_LIMITED",
+        message: "มีการพยายามเข้าสู่ระบบจากเครือข่าย IP นี้ผิดพลาดบ่อยเกินไป กรุณารอ 15 นาที",
       }, 429);
     }
   } catch (err) {
@@ -896,7 +931,9 @@ app.post("/pos/checkout", authMiddleware, requirePermission("pos.checkout"), asy
     );
   }
 
-  // P0.5 & P0.6: Deduct inventory per aggregated product with race condition guard: AND quantity >= ?
+  // P0: Deduct inventory per aggregated product
+  // Trigger `trg_prevent_negative_inventory` guarantees that if quantity < 0, SQLite aborts the entire transaction!
+  // And trigger `trg_sync_inventory_update` automatically synchronizes products.current_stock!
   const stockDeductionIndices: number[] = [];
   for (const [productId, totalDemandQty] of aggregatedQtyMap.entries()) {
     stockDeductionIndices.push(batchStatements.length);
@@ -905,18 +942,8 @@ app.post("/pos/checkout", authMiddleware, requirePermission("pos.checkout"), asy
         `UPDATE inventory SET 
           quantity = quantity - ?,
           updated_at = datetime('now', 'localtime')
-         WHERE product_id = ? AND location_id = 'loc_shelf' AND quantity >= ?`
-      ).bind(totalDemandQty, productId, totalDemandQty)
-    );
-
-    stockDeductionIndices.push(batchStatements.length);
-    batchStatements.push(
-      db.prepare(
-        `UPDATE products SET 
-          current_stock = current_stock - ?,
-          updated_at = datetime('now', 'localtime')
-         WHERE id = ? AND current_stock >= ?`
-      ).bind(totalDemandQty, productId, totalDemandQty)
+         WHERE product_id = ? AND location_id = 'loc_shelf'`
+      ).bind(totalDemandQty, productId)
     );
   }
 
@@ -1000,16 +1027,31 @@ app.post("/pos/checkout", authMiddleware, requirePermission("pos.checkout"), asy
   );
 
   // EXECUTE ALL IN SINGLE ATOMIC TRANSACTION
-  const batchResults: any = await db.batch(batchStatements);
+  let batchResults: any;
+  try {
+    batchResults = await db.batch(batchStatements);
+  } catch (err: any) {
+    // SQLite trigger RAISE(ABORT) or constraint violation rolled back the entire transaction!
+    return c.json({
+      success: false,
+      error: "CONCURRENT_STOCK_EXHAUSTED",
+      message: "เกิดข้อผิดพลาด: สต๊อกสินค้าหน้าร้านไม่เพียงพอหรือถูกตัดไปโดยแคชเชียร์เครื่องอื่นในเวลาเดียวกัน ระบบได้ทำการยกเลิกบิลโดยสมบูรณ์เพื่อป้องกันสต๊อกติดลบ",
+    }, 409);
+  }
 
-  // P0.5 & P0.6: Verify all stock deductions succeeded with meta.changes === 1
+  // P0.5 & P0.6: Verify all stock deductions affected at least 1 row (defense-in-depth against missing shelf rows)
   for (const idx of stockDeductionIndices) {
     const res = batchResults[idx];
     if (!res || res.meta?.changes < 1) {
+      // Compensating rollback if row was not found
+      await db.prepare("DELETE FROM sales WHERE id = ?").bind(saleId).run().catch(() => {});
+      await db.prepare("DELETE FROM sale_items WHERE sale_id = ?").bind(saleId).run().catch(() => {});
+      await db.prepare("DELETE FROM inventory_movements WHERE reference_id = ?").bind(invoiceNo).run().catch(() => {});
+      await db.prepare("DELETE FROM idempotency_keys WHERE key = ?").bind(idempotencyKey).run().catch(() => {});
       return c.json({
         success: false,
         error: "CONCURRENT_STOCK_EXHAUSTED",
-        message: "เกิดข้อผิดพลาด: สต๊อกสินค้าหน้าร้านถูกตัดไปโดยแคชเชียร์เครื่องอื่นในเวลาเดียวกัน ระบบได้ทำการยกเลิกบิลเพื่อป้องกันสต๊อกติดลบ",
+        message: "เกิดข้อผิดพลาด: ไม่พบรายการสต๊อกสินค้านี้บนชั้นวางหน้าร้าน ระบบได้ทำการยกเลิกบิลเรียบร้อยแล้ว",
       }, 409);
     }
   }
@@ -1094,7 +1136,7 @@ app.post("/pos/sales/:id/void", authMiddleware, requirePermission("pos.void_appr
 // -------------------------------------------------------------------
 // 5. PRODUCTS & CATALOG
 // -------------------------------------------------------------------
-app.get("/products", authMiddleware, async (c) => {
+app.get("/products", authMiddleware, requireAnyPermission("product.view", "pos.access", "stock_count.access"), async (c) => {
   const db = c.env.DB;
   const user = c.get("user")!;
   const search = c.req.query("q") || "";
@@ -1216,13 +1258,13 @@ app.delete("/products/:id", authMiddleware, requirePermission("product.manage"),
   return c.json({ success: true, message: "ปิดการใช้งานสินค้าเรียบร้อยแล้ว" });
 });
 
-app.get("/categories", async (c) => {
+app.get("/categories", authMiddleware, requireAnyPermission("product.view", "pos.access", "stock_count.access"), async (c) => {
   const db = c.env.DB;
   const cats = await db.prepare("SELECT * FROM categories WHERE is_active = 1 ORDER BY name ASC").all();
   return c.json({ success: true, data: cats.results });
 });
 
-app.get("/brands", async (c) => {
+app.get("/brands", authMiddleware, requireAnyPermission("product.view", "pos.access", "stock_count.access"), async (c) => {
   const db = c.env.DB;
   const brands = await db.prepare("SELECT * FROM brands ORDER BY name ASC").all();
   return c.json({ success: true, data: brands.results });
@@ -1231,7 +1273,7 @@ app.get("/brands", async (c) => {
 // -------------------------------------------------------------------
 // 6. INVENTORY & ATOMIC INTERNAL TRANSFERS
 // -------------------------------------------------------------------
-app.get("/inventory/locations", async (c) => {
+app.get("/inventory/locations", authMiddleware, requireAnyPermission("inventory.view", "stock_count.access", "warehouse.access"), async (c) => {
   const db = c.env.DB;
   const locs = await db.prepare(
     `SELECT wl.*, w.name as warehouse_name 
@@ -1547,6 +1589,7 @@ app.post("/stock-count/tasks/:id/approve", authMiddleware, requirePermission("st
   const batch: any[] = [];
 
   // P0.1 & P0.2: Lock Task & Status conditionally within the exact same atomic transaction batch
+  // Note: Trigger `trg_stock_count_approve_guard` raises ABORT if status != 'pending_approval', rolling back the entire batch in D1!
   batch.push(
     db.prepare(
       `UPDATE stock_count_tasks SET 
@@ -1554,7 +1597,7 @@ app.post("/stock-count/tasks/:id/approve", authMiddleware, requirePermission("st
         approved_by = ?,
         approved_at = datetime('now', 'localtime'),
         updated_at = datetime('now', 'localtime')
-       WHERE id = ? AND status = 'pending_approval'`
+       WHERE id = ?`
     ).bind(user.full_name, taskId)
   );
 
@@ -1613,12 +1656,22 @@ app.post("/stock-count/tasks/:id/approve", authMiddleware, requirePermission("st
   );
 
   // P0.8: ATOMIC COMMIT - All adjustments or none
-  const batchRes: any = await db.batch(batch);
+  let batchRes: any;
+  try {
+    batchRes = await db.batch(batch);
+  } catch (err: any) {
+    // If trigger `trg_stock_count_approve_guard` raised ABORT, D1 rolled back the entire batch!
+    return c.json({
+      success: false,
+      error: "ALREADY_APPROVED",
+      message: "ใบงานนี้ได้รับการอนุมัติไปแล้ว หรือไม่ได้อยู่ในสถานะรออนุมัติ (Concurrency Guard)",
+    }, 409);
+  }
 
   if (!batchRes || !batchRes[0] || batchRes[0].meta?.changes === 0) {
     return c.json({
       success: false,
-      error: "CONCURRENCY_CONFLICT",
+      error: "ALREADY_APPROVED",
       message: "ใบงานนี้ถูกอนุมัติไปแล้วโดยผู้ใช้อื่นในระหว่างดำเนินการ (Concurrency Guard)",
     }, 409);
   }
@@ -1629,7 +1682,7 @@ app.post("/stock-count/tasks/:id/approve", authMiddleware, requirePermission("st
 // -------------------------------------------------------------------
 // 8. PURCHASING & SUPPLIERS
 // -------------------------------------------------------------------
-app.get("/suppliers", authMiddleware, async (c) => {
+app.get("/suppliers", authMiddleware, requireAnyPermission("supplier.manage", "purchasing.access"), async (c) => {
   const db = c.env.DB;
   const sups = await db.prepare("SELECT * FROM suppliers WHERE is_active = 1 ORDER BY name ASC").all();
   return c.json({ success: true, data: sups.results });
@@ -1813,7 +1866,7 @@ app.post("/purchasing/orders/:id/receive", authMiddleware, requirePermission("wa
 // -------------------------------------------------------------------
 // 9. CUSTOMERS & MEMBERSHIP
 // -------------------------------------------------------------------
-app.get("/customers", authMiddleware, async (c) => {
+app.get("/customers", authMiddleware, requireAnyPermission("customer.manage", "pos.access"), async (c) => {
   const db = c.env.DB;
   const search = c.req.query("q") || "";
 
@@ -1987,7 +2040,7 @@ app.put("/employees/:id/status", authMiddleware, requireOwnerOnly(), async (c) =
   return c.json({ success: true, message: `ปรับสถานะพนักงานเป็น ${status} เรียบร้อยแล้ว` });
 });
 
-app.get("/roles", authMiddleware, async (c) => {
+app.get("/roles", authMiddleware, requireAnyPermission("employees.manage"), async (c) => {
   const db = c.env.DB;
   const roles = await db.prepare("SELECT * FROM roles ORDER BY created_at ASC").all();
 
@@ -2003,7 +2056,7 @@ app.get("/roles", authMiddleware, async (c) => {
   return c.json({ success: true, data: roleList });
 });
 
-app.get("/permissions", authMiddleware, async (c) => {
+app.get("/permissions", authMiddleware, requireAnyPermission("employees.manage"), async (c) => {
   const db = c.env.DB;
   const perms = await db.prepare("SELECT * FROM permissions ORDER BY module, code").all();
   return c.json({ success: true, data: perms.results });
