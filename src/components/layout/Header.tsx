@@ -10,7 +10,6 @@ import {
 } from "lucide-react";
 import { useAuthStore } from "@/store/useAuthStore";
 import { ChangePasswordModal } from "@/components/auth/ChangePasswordModal";
-import { SystemAuditModal } from "@/components/audit/SystemAuditModal";
 
 interface HeaderProps {
   onSelectModule: (mod: string) => void;
@@ -20,7 +19,6 @@ interface HeaderProps {
 export const Header: React.FC<HeaderProps> = ({ onSelectModule: _onSelectModule, onToggleSidebar }) => {
   const { currentUser, activeRole, logout } = useAuthStore();
   const [showChangePassword, setShowChangePassword] = useState(false);
-  const [showAuditModal, setShowAuditModal] = useState(false);
 
   const handleLogout = async () => {
     if (confirm("คุณต้องการออกจากระบบหรือไม่?")) {
@@ -50,17 +48,6 @@ export const Header: React.FC<HeaderProps> = ({ onSelectModule: _onSelectModule,
             <Database className="w-3.5 h-3.5 text-[#457B9D]" />
             <span>Cloudflare D1 (Remote DB)</span>
           </div>
-
-          {/* Code & System Audit Button */}
-          <button
-            onClick={() => setShowAuditModal(true)}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-[#E63946]/10 hover:bg-[#E63946]/20 border border-[#E63946]/40 text-[#E63946] text-xs font-black transition-all shadow-xs active:scale-95"
-            title="คลิกเพื่อตรวจสอบ App Code & ความพร้อมของระบบ (System & Code Health Audit)"
-          >
-            <ShieldCheck className="w-3.5 h-3.5 text-[#E63946]" />
-            <span>ตรวจ App Code</span>
-            <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-          </button>
         </div>
 
         {/* Right: Authenticated User Info & Logout */}
@@ -108,12 +95,6 @@ export const Header: React.FC<HeaderProps> = ({ onSelectModule: _onSelectModule,
       <ChangePasswordModal
         isOpen={showChangePassword}
         onClose={() => setShowChangePassword(false)}
-      />
-
-      {/* Real-time System & Code Audit Modal */}
-      <SystemAuditModal
-        isOpen={showAuditModal}
-        onClose={() => setShowAuditModal(false)}
       />
     </>
   );
