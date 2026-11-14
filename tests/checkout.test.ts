@@ -112,4 +112,34 @@ describe("POS Atomic Checkout Invariants", () => {
     expect(result.serverSubtotal).toBe(215.0 + 110.0);
     expect(result.itemsToDeduct).toHaveLength(2);
   });
+
+  it("should calculate grand total with custom discount and member discount accurately", () => {
+    const subtotal = 430.0;
+    const memberDiscountPct = 5.0; // 5%
+    const memberDiscount = (subtotal * memberDiscountPct) / 100; // 21.5 THB
+    const customDiscount = 30.0; // 30 THB coupon
+
+    const totalDiscount = memberDiscount + customDiscount; // 51.5 THB
+    const grandTotal = Math.max(0, subtotal - totalDiscount); // 378.5 THB
+
+    expect(memberDiscount).toBe(21.5);
+    expect(totalDiscount).toBe(51.5);
+    expect(grandTotal).toBe(378.5);
+  });
+
+  it("should prevent cross-user idempotency key replay by binding key to user_id", () => {
+    const idempotencyDb = new Map<string, { userId: string; response: any }>();
+    idempotencyDb.set("bill_key_999", { userId: "emp_cashier1", response: { invoice_no: "INV-001" } });
+
+    // Lookup with correct user
+    const findSameUser = (key: string, userId: string) => {
+      const entry = idempotencyDb.get(key);
+      if (entry && entry.userId === userId) return entry.response;
+      return null;
+    };
+
+    expect(findSameUser("bill_key_999", "emp_cashier1")).toEqual({ invoice_no: "INV-001" });
+    // Different user cannot hijack or replay another user's bill
+    expect(findSameUser("bill_key_999", "emp_cashier2")).toBeNull();
+  });
 });

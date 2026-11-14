@@ -33,6 +33,7 @@ export const StockCountModule: React.FC = () => {
   const [newTitle, setNewTitle] = useState("");
   const [newLocationId, setNewLocationId] = useState("");
   const [newCategoryId, setNewCategoryId] = useState("");
+  const [newAssignedTo, setNewAssignedTo] = useState("emp_checker1");
 
   // Counts entered in UI: map of sci_id -> quantity
   const [counts, setCounts] = useState<Record<string, number>>({});
@@ -93,7 +94,7 @@ export const StockCountModule: React.FC = () => {
         title: newTitle,
         location_id: newLocationId,
         category_id: newCategoryId || null,
-        assigned_to: "emp_stock_checker",
+        assigned_to: newAssignedTo || "emp_checker1",
         user_id: currentUser?.id,
       });
 

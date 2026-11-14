@@ -15,24 +15,52 @@ import { AccountingModule } from "@/components/accounting/AccountingModule";
 import { EmployeeModule } from "@/components/employees/EmployeeModule";
 import { SettingsModule } from "@/components/settings/SettingsModule";
 import { ReportsModule } from "@/components/reports/ReportsModule";
-import { useAuthStore, ROLE_PRESETS } from "@/store/useAuthStore";
+import { LoginPage } from "@/components/auth/LoginPage";
+import { ChangePasswordModal } from "@/components/auth/ChangePasswordModal";
+import { useAuthStore, ROLE_DEFAULT_PATHS } from "@/store/useAuthStore";
+import { Loader2 } from "lucide-react";
 
 export function App() {
-  const { activeRole, sessionToken, switchRole } = useAuthStore();
+  const { activeRole, isAuthenticated, isLoading, requirePasswordChange, checkAuth } = useAuthStore();
   const [currentModule, setCurrentModule] = useState<string>("dashboard");
 
-  // Ensure initial cryptographic session token is active
+  // Validate session token on mount
   useEffect(() => {
-    if (!sessionToken) {
-      switchRole(activeRole);
-    }
+    checkAuth();
   }, []);
 
   // Enforce role-based redirect when activeRole changes
   useEffect(() => {
-    const defaultMod = ROLE_PRESETS[activeRole]?.defaultPath || "dashboard";
-    setCurrentModule(defaultMod);
+    if (activeRole) {
+      const defaultMod = ROLE_DEFAULT_PATHS[activeRole] || "dashboard";
+      setCurrentModule(defaultMod);
+    }
   }, [activeRole]);
+
+  // Loading state while verifying token with Cloudflare API
+  if (isLoading) {
+    return (
+      <div className="h-screen w-screen flex flex-col items-center justify-center bg-[#F8FAFC]">
+        <div className="flex flex-col items-center gap-3">
+          <div className="w-12 h-12 rounded-2xl bg-blue-600 flex items-center justify-center text-white shadow-lg shadow-blue-500/20">
+            <Loader2 className="w-6 h-6 animate-spin" />
+          </div>
+          <span className="text-xs font-semibold text-slate-500 tracking-wide uppercase">
+            กำลังตรวจสอบสิทธิ์การเข้าใช้งาน...
+          </span>
+        </div>
+      </div>
+    );
+  }
+
+  // Not authenticated: Show production Login Screen
+  if (!isAuthenticated) {
+    return (
+      <LoginPage
+        onLoginSuccess={(defaultMod) => setCurrentModule(defaultMod)}
+      />
+    );
+  }
 
   const renderModule = () => {
     switch (currentModule) {
@@ -79,7 +107,7 @@ export function App() {
 
       {/* Main Content Area */}
       <div className="flex-1 flex flex-col h-full overflow-hidden">
-        {/* Top Header with Instant Role Switcher */}
+        {/* Top Header */}
         <Header onSelectModule={(mod) => setCurrentModule(mod)} />
 
         {/* Dynamic Active Module Container */}
@@ -87,6 +115,13 @@ export function App() {
           {renderModule()}
         </main>
       </div>
+
+      {/* Forced Password Change Modal for new accounts */}
+      <ChangePasswordModal
+        isOpen={requirePasswordChange}
+        isForced={true}
+        onClose={() => {}}
+      />
     </div>
   );
 }

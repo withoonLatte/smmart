@@ -16,6 +16,7 @@ export interface AuthUser {
   full_name: string;
   role_code: string;
   position: string;
+  force_password_change?: boolean;
   permissions: string[];
 }
 
@@ -54,7 +55,7 @@ async function hashPassword(password: string, salt?: string): Promise<string> {
     {
       name: 'PBKDF2',
       salt: enc.encode(saltStr),
-      iterations: 10000,
+      iterations: 100000,
       hash: 'SHA-256'
     },
     keyMaterial,
@@ -92,7 +93,7 @@ async function authMiddleware(c: any, next: any) {
   const db = c.env.DB;
 
   const session: any = await db.prepare(
-    `SELECT s.*, e.employee_code, e.username, e.full_name, e.role_code as emp_role, e.position, e.status
+    `SELECT s.*, e.employee_code, e.username, e.full_name, e.role_code as emp_role, e.position, e.status, e.force_password_change
      FROM user_sessions s
      JOIN employees e ON e.id = s.user_id
      WHERE s.token = ? AND s.expires_at > datetime('now', 'localtime')`
@@ -128,6 +129,7 @@ async function authMiddleware(c: any, next: any) {
     full_name: session.full_name,
     role_code: session.emp_role,
     position: session.position,
+    force_password_change: !!session.force_password_change,
     permissions: perms,
   };
 
@@ -242,9 +244,46 @@ app.post("/auth/login", async (c) => {
       position: emp.position,
       email: emp.email,
       phone: emp.phone,
+      force_password_change: !!emp.force_password_change,
       permissions: permissionList,
     }
   });
+});
+
+app.post("/auth/change-password", authMiddleware, async (c) => {
+  const { current_password, new_password } = await c.req.json();
+  const db = c.env.DB;
+  const user = c.get("user")!;
+
+  if (!current_password || !new_password) {
+    return c.json({ success: false, error: "กรุณาระบุรหัสผ่านปัจจุบันและรหัสผ่านใหม่" }, 400);
+  }
+
+  if (new_password.length < 8) {
+    return c.json({ success: false, error: "รหัสผ่านใหม่ต้องมีความยาวอย่างน้อย 8 ตัวอักษร" }, 400);
+  }
+
+  const emp: any = await db.prepare("SELECT password_hash FROM employees WHERE id = ?").bind(user.id).first();
+  if (!emp) {
+    return c.json({ success: false, error: "ไม่พบข้อมูลพนักงาน" }, 404);
+  }
+
+  const isMatch = await verifyPassword(current_password, emp.password_hash);
+  if (!isMatch) {
+    return c.json({ success: false, error: "รหัสผ่านปัจจุบันไม่ถูกต้อง" }, 400);
+  }
+
+  const newHash = await hashPassword(new_password);
+  await db.prepare(
+    `UPDATE employees SET password_hash = ?, force_password_change = 0, updated_at = datetime('now', 'localtime') WHERE id = ?`
+  ).bind(newHash, user.id).run();
+
+  await db.prepare(
+    `INSERT INTO audit_logs (id, user_id, user_name, action, module, record_id, details)
+     VALUES (?, ?, ?, 'AUTH_CHANGE_PASSWORD', 'AUTH', ?, 'เปลี่ยนรหัสผ่านสำเร็จ')`
+  ).bind(genId("aud"), user.id, user.full_name, user.id).run();
+
+  return c.json({ success: true, message: "เปลี่ยนรหัสผ่านเรียบร้อยแล้ว" });
 });
 
 app.post("/auth/logout", authMiddleware, async (c) => {
@@ -271,7 +310,7 @@ app.get("/auth/me", authMiddleware, async (c) => {
 // -------------------------------------------------------------------
 // 2. STORE PROFILE & SYSTEM SETTINGS
 // -------------------------------------------------------------------
-app.get("/store-profile", async (c) => {
+app.get("/store-profile", authMiddleware, async (c) => {
   const db = c.env.DB;
   const store = await db.prepare("SELECT * FROM store_profile LIMIT 1").first();
   return c.json({ success: true, data: store });
@@ -534,11 +573,11 @@ app.post("/pos/checkout", authMiddleware, requirePermission("pos.checkout"), asy
   const body = await c.req.json();
   const idempotencyKey = c.req.header("Idempotency-Key") || body.idempotency_key;
 
-  // 1. Check Idempotency Key to prevent duplicate charges
+  // 1. Check Idempotency Key bound to this user to prevent duplicate charges
   if (idempotencyKey) {
     const existingKey: any = await db.prepare(
-      "SELECT response_body FROM idempotency_keys WHERE key = ?"
-    ).bind(idempotencyKey).first();
+      "SELECT response_body FROM idempotency_keys WHERE key = ? AND user_id = ?"
+    ).bind(idempotencyKey, user.id).first();
 
     if (existingKey) {
       return c.json(JSON.parse(existingKey.response_body));
@@ -551,44 +590,56 @@ app.post("/pos/checkout", authMiddleware, requirePermission("pos.checkout"), asy
     items, // array of { product_id, quantity }
     payment_method, // cash, promptpay, card, transfer
     received_amount,
+    custom_discount,
   } = body;
 
   if (!items || !Array.isArray(items) || items.length === 0) {
     return c.json({ success: false, error: "ตะกร้าสินค้าว่างเปล่า กรุณาสแกนสินค้าก่อนชำระเงิน" }, 400);
   }
 
-  // 2. Server-side validation of products, prices, and stock
+  // 2. Aggregate duplicate product entries in cart to verify total demanded quantity
+  const aggregatedQtyMap = new Map<string, number>();
+  for (const it of items) {
+    const qty = Number(it.quantity);
+    if (!qty || qty <= 0) {
+      return c.json({ success: false, error: `จำนวนสินค้าไม่ถูกต้อง (${qty})` }, 400);
+    }
+    aggregatedQtyMap.set(it.product_id, (aggregatedQtyMap.get(it.product_id) || 0) + qty);
+  }
+
+  // Check shelf inventory: DO NOT ALLOW OVERSELL!
+  for (const [productId, totalDemandQty] of aggregatedQtyMap.entries()) {
+    const product: any = await db.prepare(
+      "SELECT id, sku, barcode, name, unit, cost_price, selling_price, is_active FROM products WHERE id = ?"
+    ).bind(productId).first();
+
+    if (!product || product.is_active === 0) {
+      return c.json({ success: false, error: `สินค้าไม่พบในระบบหรือถูกปิดใช้งาน (ID: ${productId})` }, 400);
+    }
+
+    const shelfInv: any = await db.prepare(
+      "SELECT quantity FROM inventory WHERE product_id = ? AND location_id = 'loc_shelf'"
+    ).bind(productId).first();
+
+    const currentShelfStock = shelfInv?.quantity || 0;
+    if (currentShelfStock < totalDemandQty) {
+      return c.json({
+        success: false,
+        error: `สต๊อกสินค้าหน้าร้านไม่เพียงพอ: "${product.name}" มีอยู่ ${currentShelfStock} ${product.unit} (ต้องการขายรวม ${totalDemandQty} ${product.unit})`,
+      }, 400);
+    }
+  }
+
+  // Calculate official server prices and subtotals
   let verifiedSubtotal = 0;
   const verifiedItems: any[] = [];
   const batchStatements: any[] = [];
 
   for (const it of items) {
     const qty = Number(it.quantity);
-    if (!qty || qty <= 0) {
-      return c.json({ success: false, error: `จำนวนสินค้าไม่ถูกต้อง (${qty})` }, 400);
-    }
-
-    // Query real product from server database
     const product: any = await db.prepare(
-      "SELECT id, sku, barcode, name, unit, cost_price, selling_price, is_active FROM products WHERE id = ?"
+      "SELECT id, sku, barcode, name, unit, cost_price, selling_price FROM products WHERE id = ?"
     ).bind(it.product_id).first();
-
-    if (!product || product.is_active === 0) {
-      return c.json({ success: false, error: `สินค้าไม่พบในระบบหรือถูกปิดใช้งาน (ID: ${it.product_id})` }, 400);
-    }
-
-    // Check shelf inventory: DO NOT ALLOW OVERSELL!
-    const shelfInv: any = await db.prepare(
-      "SELECT quantity FROM inventory WHERE product_id = ? AND location_id = 'loc_shelf'"
-    ).bind(product.id).first();
-
-    const currentShelfStock = shelfInv?.quantity || 0;
-    if (currentShelfStock < qty) {
-      return c.json({
-        success: false,
-        error: `สต๊อกสินค้าหน้าร้านไม่เพียงพอ: "${product.name}" มีอยู่ ${currentShelfStock} ${product.unit} (ต้องการขาย ${qty} ${product.unit})`,
-      }, 400);
-    }
 
     const itemSubtotal = product.selling_price * qty;
     verifiedSubtotal += itemSubtotal;
@@ -605,8 +656,8 @@ app.post("/pos/checkout", authMiddleware, requirePermission("pos.checkout"), asy
     });
   }
 
-  // 3. Customer Discount calculation on server
-  let verifiedDiscount = 0;
+  // 3. Discount calculation on server
+  let memberDiscount = 0;
   let customerName = "ลูกค้าทั่วไป";
   if (customer_id) {
     const cust: any = await db.prepare(
@@ -615,11 +666,13 @@ app.post("/pos/checkout", authMiddleware, requirePermission("pos.checkout"), asy
 
     if (cust) {
       customerName = cust.name;
-      verifiedDiscount = (verifiedSubtotal * (Number(cust.discount_pct) || 0)) / 100;
+      memberDiscount = (verifiedSubtotal * (Number(cust.discount_pct) || 0)) / 100;
     }
   }
 
-  const verifiedGrandTotal = Math.max(0, verifiedSubtotal - verifiedDiscount);
+  const clientCustomDiscount = Math.max(0, Number(custom_discount) || 0);
+  const totalDiscount = Math.min(verifiedSubtotal, memberDiscount + clientCustomDiscount);
+  const verifiedGrandTotal = Math.max(0, verifiedSubtotal - totalDiscount);
   const vatRate = 7.0;
   const verifiedVat = (verifiedGrandTotal * vatRate) / (100 + vatRate);
 
@@ -643,12 +696,12 @@ app.post("/pos/checkout", authMiddleware, requirePermission("pos.checkout"), asy
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'completed')`
     ).bind(
       saleId, invoiceNo, shift_id || null, user.id, customer_id || null, customerName,
-      verifiedSubtotal, verifiedDiscount, verifiedVat, verifiedGrandTotal,
+      verifiedSubtotal, totalDiscount, verifiedVat, verifiedGrandTotal,
       payment_method, numReceived, changeAmount
     )
   );
 
-  // B. Insert Sale Items, deduct inventory, and record movements
+  // B. Insert Sale Items
   for (const item of verifiedItems) {
     const itemId = genId("item");
     batchStatements.push(
@@ -663,16 +716,6 @@ app.post("/pos/checkout", authMiddleware, requirePermission("pos.checkout"), asy
       )
     );
 
-    // Atomic Inventory deduction (strictly checked > qty beforehand)
-    batchStatements.push(
-      db.prepare(
-        `UPDATE inventory SET 
-          quantity = quantity - ?,
-          updated_at = datetime('now', 'localtime')
-         WHERE product_id = ? AND location_id = 'loc_shelf'`
-      ).bind(item.quantity, item.product_id)
-    );
-
     // Record movement
     batchStatements.push(
       db.prepare(
@@ -684,6 +727,27 @@ app.post("/pos/checkout", authMiddleware, requirePermission("pos.checkout"), asy
         genId("mov"), item.product_id, item.quantity, item.cost_price,
         invoiceNo, user.full_name
       )
+    );
+  }
+
+  // Deduct inventory per aggregated product with race condition guard: AND quantity >= ?
+  for (const [productId, totalDemandQty] of aggregatedQtyMap.entries()) {
+    batchStatements.push(
+      db.prepare(
+        `UPDATE inventory SET 
+          quantity = quantity - ?,
+          updated_at = datetime('now', 'localtime')
+         WHERE product_id = ? AND location_id = 'loc_shelf' AND quantity >= ?`
+      ).bind(totalDemandQty, productId, totalDemandQty)
+    );
+
+    batchStatements.push(
+      db.prepare(
+        `UPDATE products SET 
+          current_stock = current_stock - ?,
+          updated_at = datetime('now', 'localtime')
+         WHERE id = ? AND current_stock >= ?`
+      ).bind(totalDemandQty, productId, totalDemandQty)
     );
   }
 
@@ -747,7 +811,7 @@ app.post("/pos/checkout", authMiddleware, requirePermission("pos.checkout"), asy
       customer_id,
       customer_name: customerName,
       subtotal: verifiedSubtotal,
-      discount_amount: verifiedDiscount,
+      discount_amount: totalDiscount,
       vat_amount: verifiedVat,
       grand_total: verifiedGrandTotal,
       payment_method,
@@ -1049,10 +1113,10 @@ app.post("/inventory/transfer", authMiddleware, requirePermission("inventory.tra
 
   // ATOMIC BATCH FOR TRANSFER
   const batch = [
-    // Deduct from source
+    // Deduct from source with atomic race-condition guard
     db.prepare(
-      "UPDATE inventory SET quantity = quantity - ?, updated_at = datetime('now', 'localtime') WHERE product_id = ? AND location_id = ?"
-    ).bind(qty, product_id, from_location_id),
+      "UPDATE inventory SET quantity = quantity - ?, updated_at = datetime('now', 'localtime') WHERE product_id = ? AND location_id = ? AND quantity >= ?"
+    ).bind(qty, product_id, from_location_id, qty),
     // Add to destination
     db.prepare(
       `INSERT INTO inventory (id, product_id, location_id, quantity, reserved_quantity)
@@ -1226,9 +1290,12 @@ app.post("/stock-count/tasks/:id/submit", authMiddleware, requirePermission("sto
 
   const batch: any[] = [];
   for (const item of counts) {
-    const sci: any = await db.prepare("SELECT system_quantity FROM stock_count_items WHERE id = ?").bind(item.id).first();
+    const sci: any = await db.prepare("SELECT id, system_quantity FROM stock_count_items WHERE id = ? AND task_id = ?").bind(item.id, taskId).first();
+    if (!sci) {
+      return c.json({ success: false, error: `รายการสินค้า (ID: ${item.id}) ไม่ได้อยู่ในใบงานนี้` }, 400);
+    }
     const counted = Number(item.counted_quantity);
-    const diff = counted - (sci?.system_quantity || 0);
+    const diff = counted - (sci.system_quantity || 0);
     const status = diff === 0 ? "matched" : "discrepancy";
 
     batch.push(
@@ -1238,8 +1305,8 @@ app.post("/stock-count/tasks/:id/submit", authMiddleware, requirePermission("sto
           difference = ?,
           status = ?,
           counted_at = datetime('now', 'localtime')
-         WHERE id = ?`
-      ).bind(counted, diff, status, item.id)
+         WHERE id = ? AND task_id = ?`
+      ).bind(counted, diff, status, item.id, taskId)
     );
   }
 
@@ -1267,12 +1334,21 @@ app.post("/stock-count/tasks/:id/approve", authMiddleware, requirePermission("st
   const task: any = await db.prepare("SELECT * FROM stock_count_tasks WHERE id = ?").bind(taskId).first();
   if (!task) return c.json({ success: false, error: "ไม่พบใบงาน" }, 404);
 
-  // Anti-Double Approval Guard
-  if (task.status === "approved") {
-    return c.json({ success: false, error: "ใบงานนี้ได้รับการอนุมัติไปแล้ว ป้องกันการอนุมัติซ้ำ" }, 400);
-  }
-  if (task.status !== "pending_approval") {
-    return c.json({ success: false, error: `ใบงานนี้ไม่อยู่ในสถานะรออนุมัติ (สถานะปัจจุบัน: ${task.status})` }, 400);
+  // Atomic Conditional update: Lock & verify status in single DB operation (Race Condition Prevention)
+  const lockUpdate: any = await db.prepare(
+    `UPDATE stock_count_tasks SET 
+      status = 'approved',
+      approved_by = ?,
+      approved_at = datetime('now', 'localtime'),
+      updated_at = datetime('now', 'localtime')
+     WHERE id = ? AND status = 'pending_approval'`
+  ).bind(user.full_name, taskId).run();
+
+  if (!lockUpdate || lockUpdate.meta?.changes === 0) {
+    return c.json({
+      success: false,
+      error: "ใบงานนี้ได้รับการอนุมัติหรือเปลี่ยนสถานะไปแล้ว ป้องกันการอนุมัติซ้ำ (Concurrency Conflict)",
+    }, 409);
   }
 
   const items = await db.prepare("SELECT * FROM stock_count_items WHERE task_id = ?").bind(taskId).all();

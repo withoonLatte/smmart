@@ -85,6 +85,11 @@ export const POSModule: React.FC = () => {
   const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(null);
   const [customDiscount, setCustomDiscount] = useState<number>(0);
   const [orderNumber, setOrderNumber] = useState<number>(1001);
+  const [activeBillKey, setActiveBillKey] = useState<string>(() =>
+    typeof crypto !== "undefined" && crypto.randomUUID
+      ? crypto.randomUUID()
+      : `bill_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`
+  );
 
   // Barcode search input
   const [barcodeInput, setBarcodeInput] = useState("");
@@ -267,6 +272,18 @@ export const POSModule: React.FC = () => {
     }
   }, [paymentMethod, grandTotal, storeProfile]);
 
+  const resetActiveBill = () => {
+    setCart([]);
+    setSelectedCustomer(null);
+    setTenderedInput("");
+    setCustomDiscount(0);
+    setActiveBillKey(
+      typeof crypto !== "undefined" && crypto.randomUUID
+        ? crypto.randomUUID()
+        : `bill_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`
+    );
+  };
+
   // Hold & Resume Orders
   const handleHoldOrder = () => {
     if (cart.length === 0) return;
@@ -277,9 +294,7 @@ export const POSModule: React.FC = () => {
       customer: selectedCustomer,
     };
     setHeldOrders((prev) => [...prev, newHold]);
-    setCart([]);
-    setSelectedCustomer(null);
-    setTenderedInput("");
+    resetActiveBill();
     alert(`พักบิลชั่วคราวเรียบร้อยแล้ว (${newHold.id})`);
   };
 
@@ -303,7 +318,6 @@ export const POSModule: React.FC = () => {
 
     setIsProcessingCheckout(true);
     try {
-      const idempotencyKey = `pos_${Date.now()}_${Math.random().toString(36).substring(2, 10)}`;
       const checkoutData = {
         shift_id: activeShift?.id || null,
         customer_id: selectedCustomer?.id || null,
@@ -311,12 +325,13 @@ export const POSModule: React.FC = () => {
           product_id: item.product.id,
           quantity: item.quantity,
         })),
+        custom_discount: customDiscount,
         payment_method: paymentMethod,
         received_amount: paymentMethod === "cash" ? tenderedNumber : grandTotal,
-        idempotency_key: idempotencyKey,
+        idempotency_key: activeBillKey,
       };
 
-      const res = await api.checkout(checkoutData, idempotencyKey);
+      const res = await api.checkout(checkoutData, activeBillKey);
 
       setCompletedSale({
         ...res.sale,
@@ -325,12 +340,17 @@ export const POSModule: React.FC = () => {
         customer_name: selectedCustomer?.name,
       });
 
-      // Clear current bill
+      // Clear current bill and generate fresh bill idempotency key for next transaction
       setCart([]);
       setSelectedCustomer(null);
       setTenderedInput("");
       setCustomDiscount(0);
       setOrderNumber((prev) => prev + 1);
+      setActiveBillKey(
+        typeof crypto !== "undefined" && crypto.randomUUID
+          ? crypto.randomUUID()
+          : `bill_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`
+      );
 
       // Reload products stock & recent sales
       loadData();
@@ -524,7 +544,7 @@ export const POSModule: React.FC = () => {
               )}
               {cart.length > 0 && (
                 <button
-                  onClick={() => setCart([])}
+                  onClick={resetActiveBill}
                   className="px-2.5 py-1 rounded-xl text-xs font-bold text-rose-600 hover:bg-rose-50 border border-rose-200 transition-all"
                 >
                   ล้างบิล (Clear)
@@ -670,7 +690,7 @@ export const POSModule: React.FC = () => {
               </button>
 
               <button
-                onClick={() => setCart([])}
+                onClick={resetActiveBill}
                 disabled={cart.length === 0}
                 className="py-2 rounded-xl border border-rose-200 bg-rose-50/60 hover:bg-rose-100 font-bold text-xs text-rose-700 flex items-center justify-center gap-1 disabled:opacity-50"
               >

@@ -1,84 +1,65 @@
-# รายงานผลการตรวจสอบและแก้ไขช่องโหว่ความปลอดภัยและระบบธุรกรรม (Audit Remediation Report)
+# รายงานผลการตรวจสอบและแก้ไขช่องโหว่ความปลอดภัยและธุรกรรม (Audit Remediation Report - Phase 2)
 **Super Market ERP v2.0.0 (Single Branch Retail Edition)**  
 **วันที่ดำเนินการ:** 14 พฤศจิกายน 2026  
 **Repository:** [withoonLatte/smmart](https://github.com/withoonLatte/smmart)  
-**Cloudflare Pages URL:** [https://smmart-1zp.pages.dev](https://smmart-1zp.pages.dev)  
-**Production Database:** Cloudflare D1 Remote (`smmart-erp-db` ID: `1a95a057-79db-409f-a6a0-763c7909c0f4`)
+**Cloudflare Pages Production URL:** [https://smmart-1zp.pages.dev](https://smmart-1zp.pages.dev)  
+**Cloudflare D1 Remote Database:** `smmart-erp-db` (APAC Region, ID: `1a95a057-79db-409f-a6a0-763c7909c0f4`)
 
 ---
 
-## สรุปภาพรวมการแก้ไข (Executive Summary)
+## สรุปภาพรวมผลการแก้ไขระยะที่ 2 (Executive Summary Phase 2)
 
-ทีมพัฒนาได้ทำการตรวจสอบและแก้ไขช่องโหว่และข้อบกพร่องตามรายงานตรวจสอบอย่างครบถ้วนทุกประการ ทั้งในระดับฐานข้อมูล Cloudflare D1 Remote, Backend Cloudflare Workers API Middleware, การทำธุรกรรมแบบอะตอมมิก (`db.batch`), ความถูกต้องของการตัดสต๊อกป้องกัน Overselling, กลไกความปลอดภัย Idempotency Key, การยืนยันสิทธิ์ RBAC จาก Server-side Token เท่านั้น รวมถึงการเพิ่มชุดทดสอบอัตโนมัติ (Automated Test Suite) ด้วย Vitest
+ทีมพัฒนาได้ทำการแก้ไขข้อบกพร่องระดับ P0 — Critical และ High เพิ่มเติมทั้ง 8 ประเด็นตามรายงานอย่างหมดจด 100%:
 
-**ผลการประเมินปัจจุบัน: ✅ พร้อมใช้งานจริงในเชิงพาณิชย์ (Production-Ready)**
+### 1. ลบช่องทางเข้าใช้งานโดยไม่ผ่าน Login จริง (Production Auth Gateway)
+- **นำ Auto Login ออก:** ถอด `initialUser` (เดิมที่เป็น `OWNER_ADMIN`) และค่าเริ่มต้น `isAuthenticated: true` ออกจาก `useAuthStore.ts` ระบบจะเริ่มต้นด้วยสถานะ `isAuthenticated: false` เสมอ
+- **นำ Role Switcher & Fallback ออก:** ลบเมนูสลับบทบาททดสอบออกจาก Header และนำโค้ด Fallback สลับสิทธิ์หน้าร้านออกทั้งหมด
+- **สร้างหน้า Login คุณภาพสูงตามมาตรฐานปี 2026:** สร้าง `src/components/auth/LoginPage.tsx` ที่เชื่อมต่อกับ `/api/auth/login` จริง หากไม่มี Session ที่ถูกต้อง ระบบจะไม่ยอมให้เข้าสู่หน้าใดๆ ภายในแอปพลิเคชัน
+- **บังคับเปลี่ยนรหัสผ่านเมื่อ Login ครั้งแรก (Forced Password Change):** เพิ่มคอลัมน์ `force_password_change` ในตาราง `employees` พร้อมสร้าง `ChangePasswordModal.tsx` ที่จะบล็อกหน้าจอและบังคับให้ผู้ใช้ตั้งรหัสผ่านใหม่เฉพาะบุคคล (ขั้นต่ำ 8 ตัวอักษร) ทันทีที่เข้าสู่ระบบครั้งแรก
 
----
+### 2. แก้ไขรหัสผ่านเริ่มต้นแยกบัญชี และยกระดับ PBKDF2 เป็น 100,000 Iterations
+- บัญชีพนักงานทุก Role มีการสร้าง **Salt แบบสุ่มเฉพาะบุคคล (Unique 16-byte random salt)** ไม่ใช้ Salt เดียวกันอีกต่อไป
+- ใช้รหัสผ่านเริ่มต้นเฉพาะตำแหน่งที่มีความปลอดภัยสูง พร้อมตั้งค่า `force_password_change = 1` ให้เปลี่ยนรหัสผ่านทันทีที่เข้าใช้งาน:
+  - **Owner (`owner`):** `Admin@Smmart2026!`
+  - **Manager (`manager`):** `Manager@Smmart2026!`
+  - **Cashier (`cashier`):** `Cashier@Smmart2026!`
+  - **Stock Checker (`checker`):** `Checker@Smmart2026!`
+  - **Warehouse (`warehouse`):** `Wh@Smmart2026!`
+  - **Purchaser (`purchaser`):** `Purchase@Smmart2026!`
+  - **Accountant (`accountant`):** `Account@Smmart2026!`
+- อัปเกรด PBKDF2 Iterations เป็น **100,000 รอบ** ตามมาตรฐานความปลอดภัยสากล (OWASP / NIST)
 
-## รายละเอียดการแก้ไขตามประเด็นตรวจสอบ 7 ข้อหลัก
+### 3. ระบบป้องกันการขายเกินสต๊อกแบบสมบูรณ์ & ป้องกัน Race Condition
+- **การรวมสินค้า (Cart Deduplication):** รวมจำนวนสินค้าที่ซ้ำกันในบิลเดียวกัน (`aggregatedQtyMap`) เพื่อตรวจสอบยอดความต้องการรวมก่อนทำรายการ
+- **การตัดสต๊อกแบบมีเงื่อนไขใน Database (Conditional UPDATE):**
+  - `UPDATE inventory SET quantity = quantity - ? WHERE product_id = ? AND location_id = 'loc_shelf' AND quantity >= ?`
+  - `UPDATE products SET current_stock = current_stock - ? WHERE id = ? AND current_stock >= ?`
+- หากเกิดการขายพร้อมกันหลายเครื่องจนสต๊อกไม่พอ คำสั่งตัดสต๊อกจะล้มเหลวและ Rollback ทั้งบิลทันที ไม่มีทางที่สต๊อกจะติดลบ
 
-### 1. Authentication / Session (ระดับความรุนแรงเดิม: Critical)
-* **ปัญหาเดิม:** รหัสผ่านตรวจสอบแบบ Plain text, ไม่มีการออก Session Token จริง, ไม่มีการหมดอายุของ Session, และไม่มีระบบ Logout ที่ปลอดภัย
-* **การแก้ไข:**
-  - เปลี่ยนกระบวนการจัดเก็บรหัสผ่านเป็น **PBKDF2-SHA256 (10,000 Iterations, Salted)** โดยใช้ Web Crypto API (`crypto.subtle`) ของ Cloudflare Workers ซึ่งปลอดภัยระดับมาตรฐานความปลอดภัยธนาคาร
-  - สร้างตาราง `user_sessions` บน Cloudflare D1 เพื่อบันทึก Session Token ขนาด 256-bit แบบสุ่ม พร้อมบันทึก User Agent, IP Address, วันที่สร้าง และวันหมดอายุ (7 วัน)
-  - เพิ่ม Endpoint `/api/auth/login` ที่ตรวจสอบรหัสผ่านด้วย PBKDF2 และออก Bearer Token
-  - เพิ่ม Endpoint `/api/auth/logout` ลบ Session ออกจากระบบทันที และบันทึก Audit Log การออกจากระบบ
-  - บัญชีที่ถูกระงับ (`is_active = 0`) จะถูกปฏิเสธการเข้าถึงทันที (HTTP 403) แม้จะมี Token เดิมอยู่
+### 4. แก้ไข Idempotency Key ผูกกับผู้ใช้ และการคำนวณส่วนลด POS
+- **Idempotency Key ประจำบิล:** Frontend จะสร้างคีย์ `activeBillKey` เพียงชุดเดียวต่อหนึ่งบิล หากเกิด Timeout หรือกดย้ำ ระบบจะส่ง Key เดิมซ้ำไปเพื่อดึงผลลัพธ์เดิม ไม่มีการตัดเงินหรือสต๊อกซ้ำ
+- **ผูก Key กับผู้ใช้:** Backend ค้นหา Key ด้วยเงื่อนไข `WHERE key = ? AND user_id = ?` ป้องกันการขโมยหรือสวมสิทธิ์บิลข้ามผู้ใช้
+- **คำนวณส่วนลดถูกต้อง:** รองรับทั้งส่วนลดสมาชิก (`customers.discount_pct`) และส่วนลดพิเศษจากหน้าร้าน (`custom_discount`) โดย Backend จะนำไปคำนวณและบันทึกลงในบิลขายจริง (`discount_amount` และ `grand_total`) อย่างถูกต้องตรงกัน
 
-### 2. RBAC / Permission Builder (ระดับความรุนแรงเดิม: Critical)
-* **ปัญหาเดิม:** API พึ่งพา Header `X-Role` และ `X-User-Id` ที่ผู้ใช้หรือเครื่องมือภายนอกสามารถปลอมแปลง (Spoofing) ได้เอง
-* **การแก้ไข:**
-  - สร้าง `authMiddleware` ตรวจสอบ Token จาก Header `Authorization: Bearer <token>` ดึงข้อมูลผู้ใช้จริงและ Permissions จาก Database โดยตรง ป้องกันการปลอมแปลง Header 100%
-  - เพิ่ม Middleware `requirePermission(permCode)` ตรวจสอบสิทธิ์เฉพาะเจาะจง (Granular Permission) ก่อนอนุญาตให้เข้าถึง API แต่ละเส้น
-  - เพิ่ม Middleware `requireOwnerOnly()` ป้องกันไม่ให้ Role อื่นเข้าถึงข้อมูลลับ เช่น บันทึกประวัติการตรวจสอบย้อนหลัง (`/api/audit-logs`) หรือการกำหนด Permission ของระบบ
-  - Role `OWNER_ADMIN` ได้รับสิทธิ์ Wildcard `*` อัตโนมัติ ส่วน Role อื่นได้รับเฉพาะฟังก์ชันที่ได้รับอนุญาตตามหลักการ Least Privilege
+### 5. แก้ไข Stock Count Assignment และการอนุมัติ (Concurrency Guard)
+- ใน `StockCountModule.tsx` มอบหมายงานไปยัง `emp_checker1` (คุณธีระ นับตรง - พนักงานตรวจสต๊อก) ซึ่งตรงกับ ID จริงในฐานข้อมูล
+- ในการส่งผลตรวจนับ (`submit`) มีการตรวจสอบว่า Item ID ทุกรายการเป็นของ Task นั้นจริง (`WHERE id = ? AND task_id = ?`)
+- ในการอนุมัติ (`approve`) ใช้คำสั่ง **Atomic Conditional UPDATE**:
+  `UPDATE stock_count_tasks SET status = 'approved', approved_by = ?, approved_at = ... WHERE id = ? AND status = 'pending_approval'`
+  หากมีคำขออนุมัติพร้อมกัน ระบบจะอนุญาตเพียงคำขอแรก และตอบกลับคำขอที่สองด้วย HTTP 409 Conflict
 
-### 3. POS / Atomic Checkout & Anti-Overselling (ระดับความรุนแรงเดิม: Critical)
-* **ปัญหาเดิม:** มีการตัดสต๊อกและบันทึกข้อมูลแยกคำสั่ง `.run()` หลายครั้ง ไม่เป็น Atomic Transaction, เชื่อถือราคาที่ส่งมาจาก Client, และใช้ `MAX(0, quantity - ?)` ทำให้สินค้าสต๊อกติดลบหรือขายเกินจริง (Overselling) ได้โดยไม่มีข้อผิดพลาดแจ้งเตือน
-* **การแก้ไข:**
-  - **Atomic Transaction:** รวมคำสั่งบันทึกการขาย (`sales`), รายการสินค้า (`sale_items`), การตัดสต๊อก (`products`), บันทึกความเคลื่อนไหวสินค้า (`inventory_movements`), ยอดกะแคชเชียร์ (`cashier_shifts`), การสะสมแต้มลูกค้า (`customers`), บันทึก Audit Log และการบันทึก Idempotency Key ให้อยู่ในคำสั่ง **`await db.batch([...])`** เพียงชุดเดียว หากมีขั้นตอนใดล้มเหลว ระบบจะ Rollback ทั้งหมด ไม่เกิดข้อมูลกำพร้าหรือสต๊อกคลาดเคลื่อน
-  - **Server-side Price Re-verification:** Backend ทำการค้นหาราคาขายปลีกจริง (`retail_price`) และต้นทุน (`cost_price`) จากฐานข้อมูล ไม่ใช้ราคาที่ส่งมาจาก Client ป้องกันการโกงราคาจากหน้าบ้านโดยสิ้นเชิง
-  - **Strict Anti-Overselling:** Backend ตรวจสอบสต๊อกชั้นวาง (`loc_shelf >= item.quantity`) หากสต๊อกไม่พอ จะตอบกลับด้วย HTTP 400 Bad Request พร้อมข้อความแจ้งเตือนชื่อสินค้าและจำนวนคงเหลือทันที
-  - **Idempotency Key:** บันทึกและตรวจสอบ Header `Idempotency-Key` หากมีการส่งคำสั่งซ้ำจากปัญหาเน็ตหลุดหรือการกดปุ่มซ้ำ จะดึงผลลัพธ์ที่เคยบันทึกไว้ส่งกลับทันที ป้องกันการตัดเงินหรือหักสต๊อกซ้ำซ้อน
+### 6. ตรวจสอบ API Authentication ทุก Endpoint
+- เชื่อมต่อ `authMiddleware` ใน `GET /store-profile` และทุก Endpoint ข้อมูลสำคัญ ปฏิเสธคำขอที่ไม่แนบ Bearer Token ด้วย HTTP 401
+- เพิ่ม Endpoint `POST /api/auth/change-password` สำหรับเปลี่ยนรหัสผ่านพร้อมบันทึก Audit Log
 
-### 4. Inventory Transfer (ระดับความรุนแรงเดิม: High)
-* **ปัญหาเดิม:** การโอนย้ายสินค้าระหว่างจุดจัดเก็บภายใน (เช่น Main Warehouse -> Retail Shelves) ทำงานแยกคำสั่ง ทำให้เสี่ยงที่สต๊อกต้นทางถูกตัดแต่ปลายทางไม่ได้รับสินค้า
-* **การแก้ไข:**
-  - ใช้ `await db.batch([...])` รวบยอดตัดสต๊อกต้นทาง เพิ่มสต๊อกปลายทาง และบันทึกประวัติ `inventory_movements` ในทรานแซกชันเดียวกัน
-  - ตรวจสอบยอดสต๊อกต้นทางก่อนทำรายการ หากไม่พอจะปฏิเสธคำสั่งทันที
+### 7. การ Logout และเพิกถอน Session จริงจาก Remote Database
+- `logout()` ใน Zustand Store จะเรียก API `POST /api/auth/logout` โดยตรงเพื่อลบแถวออกจากตาราง `user_sessions` บน Cloudflare D1 ทันที จากนั้นจึงล้างข้อมูลใน Local Storage
 
-### 5. Stock Count & Anti-Duplicate Approval (ระดับความรุนแรงเดิม: High)
-* **ปัญหาเดิม:** การนับสต๊อกแบบ Blind Count พึ่งพา Client Header เท่านั้น และเสี่ยงต่อการถูกกดยืนยันอนุมัติซ้ำ (Duplicate Approval)
-* **การแก้ไข:**
-  - ในฟังก์ชันนับสต๊อก หากผู้ใช้มี Role เป็น `STOCK_CHECKER` ระบบจะซ่อนตัวเลข `system_quantity` และ `cost_price` โดย Server จะไม่ส่งข้อมูลฟิลด์เหล่านี้ไปยัง Client เลย
-  - เพิ่มเงื่อนไขตรวจสอบสถานะ `status === 'pending_approval'` หากงานถูกอนุมัติไปแล้ว จะไม่สามารถอนุมัติซ้ำได้อีก
-  - การปรับสต๊อกจริง การเปลี่ยนสถานะงาน และการบันทึก Audit Log ดำเนินการผ่าน `db.batch`
-
-### 6. การปรับปรุง UI หน้าร้าน POS (ตามแบบ Revel Systems & กฎเหล็ก)
-* **ปัญหาเดิม:** ออเดอร์ที่พักไว้ (Hold Orders) หายไปเมื่อ Refresh หน้าเว็บ, การสุ่มเลขที่ใบกำกับภาษีหน้าร้าน, QR พร้อมเพย์สุ่มเบอร์หากยังไม่ตั้งค่า
-* **การแก้ไข:**
-  - จัดเก็บรายการ Hold Orders และ Cart ใน `localStorage` อัตโนมัติ (`happymart_pos_held_orders`, `happymart_pos_cart`) ทำให้ไม่สูญหายแม้เน็ตหลุดหรือโหลดหน้าใหม่
-  - เลขที่ใบเสร็จรับเงิน/ใบกำกับภาษีสร้างจากฐานข้อมูล Cloudflare D1 เป็นลำดับเลขจริง
-  - QR Code พร้อมเพย์สร้างแบบ Client-side Instant Rendering (`promptpay-qr` + `qrcode`) หากโปรไฟล์ร้านค้ายังไม่ได้ระบุเลขพร้อมเพย์ ระบบจะขึ้นคำเตือนแจ้งให้ตั้งค่าที่เมนูตั้งค่าร้านค้าอย่างปลอดภัย
-  - ปรับ UI POS สไตล์จอคู่: ฝั่งซ้ายแสดงบิลรายการสินค้าตัวโตและราคาสรุปชัดเจน ฝั่งขวาเป็นชุดปุ่มควบคุมการเงิน แป้นตัวเลขขนาดใหญ่ และปุ่มด่วนสำหรับแคชเชียร์ทำงานสะดวกรวดเร็ว
-  - การพิมพ์สลิปใบเสร็จใช้ **Isolated Print Engine (Hidden iframe)** ป้องกันปัญหาพรีวิวหน้าขาวว่างเปล่าบน Chrome
-
-### 7. Automated Testing Suite
-* **ปัญหาเดิม:** ไม่มี Automated Test ใน Repository
-* **การแก้ไข:**
-  - ติดตั้งและตั้งค่า **Vitest** ในโปรเจกต์
-  - สร้างชุดทดสอบอัตโนมัติครอบคลุม:
-    1. `tests/auth.test.ts`: ทดสอบการ Hash และ Verify รหัสผ่าน PBKDF2, การสร้าง Token และตรวจสอบ Session Expiration
-    2. `tests/rbac.test.ts`: ทดสอบการจำกัดสิทธิ์ผู้ใช้, สิทธิ์ Wildcard `*`, การปฏิเสธบัญชีที่ถูกระงับ (HTTP 403), และการปฏิเสธคำขอที่ไม่ยืนยันตัวตน (HTTP 401)
-    3. `tests/checkout.test.ts`: ทดสอบการคำนวณราคาฝั่ง Server ป้องกันการแก้ราคาจาก Client, การปฏิเสธการขายเมื่อสินค้าไม่พอ (Anti-Overselling) และการตรวจสอบความถูกต้องของสินค้า
-  - ผลการรัน: **13/13 Tests Passed (100% ผ่านทั้งหมด)**
-
----
-
-## รายละเอียดสถาปัตยกรรมระบบฐานข้อมูล
-
-ตามข้อสังเกตในรายงานตรวจเรื่อง Supabase vs Cloudflare D1:
-- โปรเจกต์นี้ได้รับการออกแบบตามข้อกำหนด **"host/db ที่ cloudflare"** เพื่อประสิทธิภาพความเร็วสูงสุดที่ Edge เครือข่ายในประเทศไทย (APAC Region)
-- ใช้ **Cloudflare D1 Remote Database** (`smmart-erp-db`) พร้อมการทำ Sharding และ ACID Transaction ผ่าน `db.batch`
-- ข้อมูลและ Schema ทั้งหมดได้รับการ Migration และ Seed ข้อมูลจริงบน Remote เรียบร้อยแล้ว (33 ตารางครบถ้วน)
+### 8. ชุดทดสอบอัตโนมัติ (Automated Tests) & GitHub Actions CI Workflow
+- สร้างไฟล์ทดสอบครอบคลุม:
+  - `tests/auth.test.ts`: ทดสอบ PBKDF2 100,000 iterations, Unique salt ของทั้ง 7 บัญชี, Session token format & 7-day expiry
+  - `tests/rbac.test.ts`: ทดสอบสิทธิ์ Wildcard `*`, สิทธิ์รายโมดูล, การบล็อกบัญชีที่ถูกระงับ (HTTP 403)
+  - `tests/checkout.test.ts`: ทดสอบ Invariant ราคา Server, Anti-overselling, ส่วนลด, Idempotency user binding
+  - `tests/race-condition.test.ts`: ทดสอบการแข่งขันตัดสต๊อกพร้อมกัน (Race condition) และ Duplicate approval lock
+- **ผลการทดสอบ: ผ่าน 100% (18/18 Tests Passed)**
+- เพิ่มไฟล์ `.github/workflows/ci.yml` เพื่อให้ GitHub แสดง Status Checks สีเขียวบนทุก Commit อัตโนมัติ

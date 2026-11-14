@@ -69,6 +69,7 @@ CREATE TABLE IF NOT EXISTS employees (
   phone TEXT,
   position TEXT,
   status TEXT DEFAULT 'active', -- active, suspended
+  force_password_change INTEGER DEFAULT 1,
   last_login_at TEXT,
   created_at TEXT DEFAULT (datetime('now', 'localtime')),
   updated_at TEXT DEFAULT (datetime('now', 'localtime'))
