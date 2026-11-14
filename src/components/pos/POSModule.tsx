@@ -114,6 +114,7 @@ export const POSModule: React.FC = () => {
   const [tenderedInput, setTenderedInput] = useState<string>("");
   const [promptPayQR, setPromptPayQR] = useState<{ qrDataUrl: string; fallbackUrl: string } | null>(null);
   const [isProcessingCheckout, setIsProcessingCheckout] = useState(false);
+  const [mobileTab, setMobileTab] = useState<"cart" | "checkout">("cart");
 
   // Modals
   const [completedSale, setCompletedSale] = useState<any>(null);
@@ -636,14 +637,48 @@ export const POSModule: React.FC = () => {
       </div>
 
       {/* ======================================================== */}
-      {/* MAIN TWO-COLUMN WORKSPACE */}
+      {/* MOBILE TAB SWITCHER (< md) */}
       {/* ======================================================== */}
-      <div className="flex-1 flex overflow-hidden">
+      <div className="flex md:hidden bg-slate-100 p-1.5 border-b border-slate-200 gap-1.5 shrink-0">
+        <button
+          type="button"
+          onClick={() => setMobileTab("cart")}
+          className={`flex-1 py-2 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all ${
+            mobileTab === "cart"
+              ? "bg-white text-blue-700 shadow-xs"
+              : "text-slate-600 hover:bg-slate-200/60"
+          }`}
+        >
+          <ShoppingBag className="w-3.5 h-3.5" />
+          <span>ตะกร้า ({cart.reduce((s, i) => s + i.quantity, 0)} ชิ้น)</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => setMobileTab("checkout")}
+          className={`flex-1 py-2 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all ${
+            mobileTab === "checkout"
+              ? "bg-emerald-600 text-white shadow-xs"
+              : "text-slate-600 hover:bg-slate-200/60"
+          }`}
+        >
+          <CreditCard className="w-3.5 h-3.5" />
+          <span>คิดเงิน (฿{grandTotal.toFixed(2)})</span>
+        </button>
+      </div>
+
+      {/* ======================================================== */}
+      {/* MAIN TWO-COLUMN WORKSPACE (Responsive Dual-Pane) */}
+      {/* ======================================================== */}
+      <div className="flex-1 flex overflow-hidden flex-col md:flex-row">
         {/* ======================================================== */}
-        {/* LEFT COLUMN: SCANNED CART & RECEIPT LIST (50% WIDTH) */}
+        {/* LEFT COLUMN: SCANNED CART & RECEIPT LIST (50% on desktop/tablet, 100% on mobile) */}
         {/* Large readable text for cashiers */}
         {/* ======================================================== */}
-        <div className="w-1/2 bg-white flex flex-col h-full border-r-2 border-slate-300 shadow-sm">
+        <div
+          className={`w-full md:w-1/2 bg-white flex-col h-full border-r-2 border-slate-300 shadow-sm ${
+            mobileTab === "cart" ? "flex" : "hidden md:flex"
+          }`}
+        >
           {/* Cart Header */}
           <div className="px-5 py-3 border-b border-slate-200 flex items-center justify-between bg-slate-50/70">
             <div>
@@ -823,14 +858,30 @@ export const POSModule: React.FC = () => {
                 <span>ยกเลิกบิล</span>
               </button>
             </div>
+
+            {/* Mobile Jump to Payment button (< md) */}
+            <div className="p-3 pt-0 md:hidden">
+              <button
+                onClick={() => setMobileTab("checkout")}
+                disabled={cart.length === 0}
+                className="w-full py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold text-xs shadow-md shadow-emerald-600/20 flex items-center justify-center gap-1.5 disabled:opacity-50"
+              >
+                <span>ไปที่หน้าชำระเงิน (฿{grandTotal.toFixed(2)})</span>
+                <ArrowRight className="w-4 h-4" />
+              </button>
+            </div>
           </div>
         </div>
 
         {/* ======================================================== */}
-        {/* RIGHT COLUMN: NUMPAD, TENDERED CASH & PAYMENT (50% WIDTH) */}
+        {/* RIGHT COLUMN: NUMPAD, TENDERED CASH & PAYMENT (Responsive) */}
         {/* Exactly styled after Revel iPad POS layout */}
         {/* ======================================================== */}
-        <div className="w-1/2 bg-slate-50 flex flex-col h-full p-4 justify-between overflow-y-auto">
+        <div
+          className={`w-full md:w-1/2 bg-slate-50 flex-col h-full p-3 sm:p-4 justify-between overflow-y-auto ${
+            mobileTab === "checkout" ? "flex" : "hidden md:flex"
+          }`}
+        >
           {/* Top 3 Stat Displays */}
           <div className="grid grid-cols-3 gap-3 mb-3">
             {/* Balance Due */}

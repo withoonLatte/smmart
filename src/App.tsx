@@ -23,6 +23,7 @@ import { Loader2 } from "lucide-react";
 export function App() {
   const { activeRole, isAuthenticated, isLoading, requirePasswordChange, checkAuth } = useAuthStore();
   const [currentModule, setCurrentModule] = useState<string>("dashboard");
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
 
   // Validate session token on mount
   useEffect(() => {
@@ -97,22 +98,23 @@ export function App() {
     }
   };
 
-  const isCashier = activeRole === "CASHIER";
-
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-[#F8FAFC]">
-      {/* Sidebar Navigation - Hidden for Cashier to maximize POS workspace */}
-      {!isCashier && (
-        <Sidebar
-          currentModule={currentModule}
-          onSelectModule={(mod) => setCurrentModule(mod)}
-        />
-      )}
+      {/* Collapsible Responsive Sidebar (Hamburger 3 stripes controlled) */}
+      <Sidebar
+        currentModule={currentModule}
+        onSelectModule={(mod) => setCurrentModule(mod)}
+        isOpen={isSidebarOpen}
+        onClose={() => setIsSidebarOpen(false)}
+      />
 
       {/* Main Content Area */}
-      <div className="flex-1 flex flex-col h-full overflow-hidden">
-        {/* Top Header */}
-        <Header onSelectModule={(mod) => setCurrentModule(mod)} />
+      <div className="flex-1 flex flex-col h-full overflow-hidden min-w-0">
+        {/* Top Header with Hamburger 3-stripes Menu Button */}
+        <Header
+          onSelectModule={(mod) => setCurrentModule(mod)}
+          onToggleSidebar={() => setIsSidebarOpen((prev) => !prev)}
+        />
 
         {/* Dynamic Active Module Container */}
         <main className="flex-1 overflow-y-auto">
