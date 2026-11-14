@@ -111,15 +111,8 @@ INSERT OR REPLACE INTO role_permissions (role_id, permission_code) VALUES
 ('role_accounting', 'accounting.access'), ('role_accounting', 'accounting.expenses'), ('role_accounting', 'accounting.reports'),
 ('role_accounting', 'reports.view');
 
--- Default Employees (PBKDF2-SHA256 salted hashes with 100,000 iterations, unique salts & distinct credentials)
--- Initial temporary passwords requiring first-login change:
--- owner: Admin@Smmart2026!
--- manager: Manager@Smmart2026!
--- cashier: Cashier@Smmart2026!
--- checker: Checker@Smmart2026!
--- warehouse: Wh@Smmart2026!
--- purchaser: Purchase@Smmart2026!
--- accountant: Account@Smmart2026!
+-- Default Employees (PBKDF2-SHA256 salted hashes with 100,000 iterations, unique random salts per user)
+-- Note: All provisioned accounts require forced password change on first authentication (force_password_change = 1)
 INSERT OR REPLACE INTO employees (id, employee_code, username, password_hash, full_name, role_code, email, phone, position, status, force_password_change) VALUES
 ('emp_owner', 'EMP-001', 'owner', '2626fad4b0040ac256394ba2609801b6:1a35746eafe42b376185f7bad615818e1684ac556904927b57e1f7348ab1db60', 'คุณวิทูรย์ ลาเต้ (เจ้าของร้าน)', 'OWNER_ADMIN', 'owner@happymart.co.th', '089-111-2222', 'เจ้าของกิจการ / CEO', 'active', 1),
 ('emp_manager', 'EMP-002', 'manager', '1756e0d30c09f5014c4afd1ea8ed65f8:0f42758051b02ec2b5224535a22065e1bb9e08451cfe8df788b8e408433eb452', 'คุณสมชาย บริหารดี (ผู้จัดการ)', 'MANAGER', 'manager@happymart.co.th', '089-222-3333', 'ผู้จัดการร้าน', 'active', 1),
@@ -191,6 +184,9 @@ INSERT OR REPLACE INTO inventory (id, product_id, location_id, quantity, reserve
 ('inv_12', 'p_breeze', 'loc_shelf', 18, 0, 'LOT2026-009'),
 ('inv_13', 'p_rice', 'loc_shelf', 15, 0, 'LOT2026-010'),
 ('inv_14', 'p_rice', 'loc_main', 40, 0, 'LOT2026-010');
+
+-- Sync product current_stock with aggregate inventory balances
+UPDATE products SET current_stock = (SELECT COALESCE(SUM(quantity), 0) FROM inventory WHERE inventory.product_id = products.id);
 
 -- Suppliers
 INSERT OR REPLACE INTO suppliers (id, code, name, tax_id, contact_person, phone, email, address, credit_terms_days, balance) VALUES

@@ -85,11 +85,18 @@ export const POSModule: React.FC = () => {
   const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(null);
   const [customDiscount, setCustomDiscount] = useState<number>(0);
   const [orderNumber, setOrderNumber] = useState<number>(1001);
-  const [activeBillKey, setActiveBillKey] = useState<string>(() =>
-    typeof crypto !== "undefined" && crypto.randomUUID
-      ? crypto.randomUUID()
-      : `bill_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`
-  );
+  const [activeBillKey, setActiveBillKey] = useState<string>(() => {
+    if (typeof window !== "undefined") {
+      const saved = localStorage.getItem("happymart_pos_active_bill_key");
+      if (saved) return saved;
+      const newKey = typeof crypto !== "undefined" && crypto.randomUUID
+        ? crypto.randomUUID()
+        : `bill_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+      localStorage.setItem("happymart_pos_active_bill_key", newKey);
+      return newKey;
+    }
+    return `bill_${Date.now()}`;
+  });
 
   // Barcode search input
   const [barcodeInput, setBarcodeInput] = useState("");
@@ -277,11 +284,13 @@ export const POSModule: React.FC = () => {
     setSelectedCustomer(null);
     setTenderedInput("");
     setCustomDiscount(0);
-    setActiveBillKey(
-      typeof crypto !== "undefined" && crypto.randomUUID
-        ? crypto.randomUUID()
-        : `bill_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`
-    );
+    const newKey = typeof crypto !== "undefined" && crypto.randomUUID
+      ? crypto.randomUUID()
+      : `bill_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+    if (typeof window !== "undefined") {
+      localStorage.setItem("happymart_pos_active_bill_key", newKey);
+    }
+    setActiveBillKey(newKey);
   };
 
   // Hold & Resume Orders
@@ -341,16 +350,8 @@ export const POSModule: React.FC = () => {
       });
 
       // Clear current bill and generate fresh bill idempotency key for next transaction
-      setCart([]);
-      setSelectedCustomer(null);
-      setTenderedInput("");
-      setCustomDiscount(0);
+      resetActiveBill();
       setOrderNumber((prev) => prev + 1);
-      setActiveBillKey(
-        typeof crypto !== "undefined" && crypto.randomUUID
-          ? crypto.randomUUID()
-          : `bill_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`
-      );
 
       // Reload products stock & recent sales
       loadData();

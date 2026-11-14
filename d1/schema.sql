@@ -108,6 +108,7 @@ CREATE TABLE IF NOT EXISTS products (
   wholesale_price REAL DEFAULT 0.0,
   min_stock REAL DEFAULT 5,
   max_stock REAL DEFAULT 500,
+  current_stock REAL DEFAULT 0 CHECK(current_stock >= 0),
   is_vat INTEGER DEFAULT 1,
   is_active INTEGER DEFAULT 1,
   image_url TEXT,
@@ -170,8 +171,8 @@ CREATE TABLE IF NOT EXISTS inventory (
   id TEXT PRIMARY KEY,
   product_id TEXT NOT NULL,
   location_id TEXT NOT NULL,
-  quantity REAL NOT NULL DEFAULT 0,
-  reserved_quantity REAL NOT NULL DEFAULT 0,
+  quantity REAL NOT NULL DEFAULT 0 CHECK(quantity >= 0),
+  reserved_quantity REAL NOT NULL DEFAULT 0 CHECK(reserved_quantity >= 0),
   batch_number TEXT,
   expiry_date TEXT,
   updated_at TEXT DEFAULT (datetime('now', 'localtime')),
@@ -483,6 +484,15 @@ CREATE TABLE IF NOT EXISTS idempotency_keys (
   created_at TEXT DEFAULT (datetime('now', 'localtime'))
 );
 
+-- 34. Login Attempts (Rate Limiting & Brute Force Prevention)
+CREATE TABLE IF NOT EXISTS login_attempts (
+  id TEXT PRIMARY KEY,
+  ip_address TEXT NOT NULL,
+  username TEXT NOT NULL,
+  attempted_at TEXT DEFAULT (datetime('now', 'localtime')),
+  success INTEGER NOT NULL
+);
+
 -- Indexes for Speed
 CREATE INDEX IF NOT EXISTS idx_products_barcode ON products(barcode);
 CREATE INDEX IF NOT EXISTS idx_products_sku ON products(sku);
@@ -492,3 +502,5 @@ CREATE INDEX IF NOT EXISTS idx_sales_invoice ON sales(invoice_no);
 CREATE INDEX IF NOT EXISTS idx_movements_prod ON inventory_movements(product_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_token ON user_sessions(token);
 CREATE INDEX IF NOT EXISTS idx_sessions_expires ON user_sessions(expires_at);
+CREATE INDEX IF NOT EXISTS idx_login_attempts_ip ON login_attempts(ip_address, attempted_at);
+CREATE INDEX IF NOT EXISTS idx_login_attempts_user ON login_attempts(username, attempted_at);

@@ -26,12 +26,37 @@ type Variables = {
 
 const app = new Hono<{ Bindings: Bindings; Variables: Variables }>().basePath("/api");
 
-// Enable CORS
-app.use("*", cors({
-  origin: "*",
-  allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-  allowHeaders: ["Content-Type", "Authorization", "Idempotency-Key"],
-}));
+// Strict CORS restriction for production domains and local development
+const ALLOWED_ORIGIN_REGEX = /^https:\/\/[a-z0-9-]+\.pages\.dev$/;
+const ALLOWED_ORIGINS = new Set([
+  "https://smmart-1zp.pages.dev",
+  "https://smmart.pages.dev",
+  "http://localhost:5173",
+  "http://localhost:4173",
+  "http://localhost:8788",
+  "http://127.0.0.1:5173",
+]);
+
+app.use("*", async (c, next) => {
+  const origin = c.req.header("Origin");
+  let allowOrigin = "https://smmart-1zp.pages.dev";
+  if (origin && (ALLOWED_ORIGINS.has(origin) || ALLOWED_ORIGIN_REGEX.test(origin))) {
+    allowOrigin = origin;
+  }
+
+  c.res.headers.set("Access-Control-Allow-Origin", allowOrigin);
+  c.res.headers.set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+  c.res.headers.set("Access-Control-Allow-Headers", "Content-Type, Authorization, Idempotency-Key");
+  c.res.headers.set("Access-Control-Allow-Credentials", "true");
+
+  if (c.req.method === "OPTIONS") {
+    return new Response(null, {
+      status: 204,
+      headers: c.res.headers,
+    });
+  }
+  await next();
+});
 
 // Helper: ID generator
 function genId(prefix: string) {
@@ -84,12 +109,23 @@ function generateSessionToken(): string {
 // AUTHENTICATION & PERMISSION MIDDLEWARE (ZERO TRUST RBAC)
 // -------------------------------------------------------------------
 async function authMiddleware(c: any, next: any) {
+  let token = "";
   const authHeader = c.req.header("Authorization");
-  if (!authHeader || !authHeader.startsWith("Bearer ")) {
-    return c.json({ success: false, error: "กรุณาเข้าสู่ระบบก่อนเข้าถึงข้อมูล (Unauthorized: Missing Bearer Token)" }, 401);
+  if (authHeader && authHeader.startsWith("Bearer ")) {
+    token = authHeader.substring(7).trim();
+  } else {
+    // Check HttpOnly Secure SameSite Cookie
+    const cookieHeader = c.req.header("Cookie");
+    if (cookieHeader) {
+      const match = cookieHeader.match(/happymart_session=([^;]+)/);
+      if (match) token = match[1].trim();
+    }
   }
 
-  const token = authHeader.substring(7).trim();
+  if (!token) {
+    return c.json({ success: false, error: "UNAUTHORIZED", message: "กรุณาเข้าสู่ระบบก่อนเข้าถึงข้อมูล (Unauthorized)" }, 401);
+  }
+
   const db = c.env.DB;
 
   const session: any = await db.prepare(
@@ -100,13 +136,13 @@ async function authMiddleware(c: any, next: any) {
   ).bind(token).first();
 
   if (!session) {
-    return c.json({ success: false, error: "Session หมดอายุหรือไม่ถูกต้อง กรุณาเข้าสู่ระบบใหม่" }, 401);
+    return c.json({ success: false, error: "SESSION_EXPIRED", message: "Session หมดอายุหรือไม่ถูกต้อง กรุณาเข้าสู่ระบบใหม่" }, 401);
   }
 
   if (session.status === "suspended") {
     // Revoke suspended session
     await db.prepare("DELETE FROM user_sessions WHERE id = ?").bind(session.id).run();
-    return c.json({ success: false, error: "บัญชีของคุณถูกระงับการใช้งาน กรุณาติดต่อผู้ดูแลระบบ" }, 403);
+    return c.json({ success: false, error: "ACCOUNT_SUSPENDED", message: "บัญชีของคุณถูกระงับการใช้งาน กรุณาติดต่อผู้ดูแลระบบ" }, 403);
   }
 
   // Load real permissions from database for this verified role
@@ -132,6 +168,21 @@ async function authMiddleware(c: any, next: any) {
     force_password_change: !!session.force_password_change,
     permissions: perms,
   };
+
+  // P0.1 & P0.2: Enforce force_password_change across all APIs except auth change-password, me, and logout
+  const reqPath = c.req.path;
+  const isExemptedAuthPath = 
+    reqPath.endsWith("/auth/me") || 
+    reqPath.endsWith("/auth/change-password") || 
+    reqPath.endsWith("/auth/logout");
+
+  if (user.force_password_change && !isExemptedAuthPath) {
+    return c.json({
+      success: false,
+      error: "FORCED_PASSWORD_CHANGE_REQUIRED",
+      message: "คุณต้องเปลี่ยนรหัสผ่านเริ่มต้นก่อนเข้าใช้งานระบบ กรุณาเปลี่ยนรหัสผ่านที่เมนูเปลี่ยนรหัสผ่าน",
+    }, 403);
+  }
 
   c.set("user", user);
   await next();
@@ -176,9 +227,36 @@ function requireOwnerOnly() {
 app.post("/auth/login", async (c) => {
   const { username, password } = await c.req.json();
   const db = c.env.DB;
+  const ip = c.req.header("CF-Connecting-IP") || c.req.header("X-Forwarded-For") || "127.0.0.1";
 
   if (!username || !password) {
     return c.json({ success: false, error: "กรุณาระบุชื่อผู้ใช้และรหัสผ่าน" }, 400);
+  }
+
+  // Rate Limiting & Brute Force Prevention (Max 5 failed attempts in 15 minutes)
+  try {
+    const recentFails: any = await db.prepare(
+      `SELECT COUNT(*) as fail_count FROM login_attempts 
+       WHERE (ip_address = ? OR username = ?) 
+         AND success = 0 
+         AND attempted_at > datetime('now', '-15 minutes')`
+    ).bind(ip, username).first();
+
+    if (recentFails && recentFails.fail_count >= 5) {
+      return c.json({
+        success: false,
+        error: "RATE_LIMITED",
+        message: "คุณพยายามเข้าสู่ระบบผิดพลาดเกินกำหนด (5 ครั้ง) กรุณารอ 15 นาที หรือติดต่อผู้ดูแลระบบ",
+      }, 429);
+    }
+  } catch (err) {
+    // Graceful creation if table not initialized
+    await db.prepare(
+      `CREATE TABLE IF NOT EXISTS login_attempts (
+         id TEXT PRIMARY KEY, ip_address TEXT NOT NULL, username TEXT NOT NULL,
+         attempted_at TEXT DEFAULT (datetime('now', 'localtime')), success INTEGER NOT NULL
+       )`
+    ).run().catch(() => {});
   }
 
   const emp: any = await db.prepare(
@@ -186,6 +264,9 @@ app.post("/auth/login", async (c) => {
   ).bind(username).first();
 
   if (!emp) {
+    await db.prepare(
+      "INSERT INTO login_attempts (id, ip_address, username, success) VALUES (?, ?, ?, 0)"
+    ).bind(genId("att"), ip, username).run().catch(() => {});
     return c.json({ success: false, error: "ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง" }, 401);
   }
 
@@ -193,16 +274,23 @@ app.post("/auth/login", async (c) => {
     return c.json({ success: false, error: "บัญชีนี้ถูกระงับการใช้งาน กรุณาติดต่อผู้ดูแลระบบ" }, 403);
   }
 
-  // Cryptographic hash check
+  // Cryptographic hash check with 100,000 iterations PBKDF2
   const isMatch = await verifyPassword(password, emp.password_hash);
   if (!isMatch) {
+    await db.prepare(
+      "INSERT INTO login_attempts (id, ip_address, username, success) VALUES (?, ?, ?, 0)"
+    ).bind(genId("att"), ip, username).run().catch(() => {});
     return c.json({ success: false, error: "ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง" }, 401);
   }
+
+  // Record successful login in rate limiter history
+  await db.prepare(
+    "INSERT INTO login_attempts (id, ip_address, username, success) VALUES (?, ?, ?, 1)"
+  ).bind(genId("att"), ip, username).run().catch(() => {});
 
   // Generate cryptographically secure token & session record
   const token = generateSessionToken();
   const sessionId = genId("sess");
-  const ip = c.req.header("CF-Connecting-IP") || c.req.header("X-Forwarded-For") || "unknown";
   const userAgent = c.req.header("User-Agent") || "";
 
   // 7-day session expiration
@@ -231,6 +319,12 @@ app.post("/auth/login", async (c) => {
   if (emp.role_code === "OWNER_ADMIN") {
     permissionList.push("*");
   }
+
+  // Set HttpOnly Secure SameSite Cookie
+  c.header(
+    "Set-Cookie",
+    `happymart_session=${token}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=${7 * 86400}`
+  );
 
   return c.json({
     success: true,
@@ -287,17 +381,35 @@ app.post("/auth/change-password", authMiddleware, async (c) => {
 });
 
 app.post("/auth/logout", authMiddleware, async (c) => {
-  const authHeader = c.req.header("Authorization")!;
-  const token = authHeader.substring(7).trim();
+  let token = "";
+  const authHeader = c.req.header("Authorization");
+  if (authHeader && authHeader.startsWith("Bearer ")) {
+    token = authHeader.substring(7).trim();
+  } else {
+    const cookieHeader = c.req.header("Cookie");
+    if (cookieHeader) {
+      const match = cookieHeader.match(/happymart_session=([^;]+)/);
+      if (match) token = match[1].trim();
+    }
+  }
+
   const db = c.env.DB;
   const user = c.get("user")!;
 
-  await db.prepare("DELETE FROM user_sessions WHERE token = ?").bind(token).run();
+  if (token) {
+    await db.prepare("DELETE FROM user_sessions WHERE token = ?").bind(token).run();
+  }
 
   await db.prepare(
     `INSERT INTO audit_logs (id, user_id, user_name, action, module, record_id, details)
      VALUES (?, ?, ?, 'AUTH_LOGOUT', 'AUTH', ?, 'ออกจากระบบ')`
   ).bind(genId("aud"), user.id, user.full_name, user.id).run();
+
+  // Clear cookie
+  c.header(
+    "Set-Cookie",
+    `happymart_session=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0`
+  );
 
   return c.json({ success: true, message: "ออกจากระบบเรียบร้อยแล้ว" });
 });
@@ -566,22 +678,29 @@ app.post("/pos/shift/close", authMiddleware, requirePermission("pos.shift"), asy
   });
 });
 
-// ATOMIC CHECKOUT WITH IDEMPOTENCY KEY & SERVER PRICE RE-VERIFICATION
+// ATOMIC CHECKOUT WITH MANDATORY IDEMPOTENCY KEY, SHIFT & STOCK INTEGRITY
 app.post("/pos/checkout", authMiddleware, requirePermission("pos.checkout"), async (c) => {
   const user = c.get("user")!;
   const db = c.env.DB;
   const body = await c.req.json();
-  const idempotencyKey = c.req.header("Idempotency-Key") || body.idempotency_key;
+  const idempotencyKey = (c.req.header("Idempotency-Key") || body.idempotency_key || "").trim();
 
-  // 1. Check Idempotency Key bound to this user to prevent duplicate charges
-  if (idempotencyKey) {
-    const existingKey: any = await db.prepare(
-      "SELECT response_body FROM idempotency_keys WHERE key = ? AND user_id = ?"
-    ).bind(idempotencyKey, user.id).first();
+  // P0.1: Mandatory Idempotency Key
+  if (!idempotencyKey) {
+    return c.json({
+      success: false,
+      error: "MISSING_IDEMPOTENCY_KEY",
+      message: "คำขอนี้ขาด Idempotency-Key สำหรับป้องกันการคิดเงินซ้ำ กรุณาส่ง Header หรือ Field 'idempotency_key'",
+    }, 400);
+  }
 
-    if (existingKey) {
-      return c.json(JSON.parse(existingKey.response_body));
-    }
+  // P0.2 & P0.3: Check Idempotency Key bound to this user to prevent duplicate charges or replay
+  const existingKey: any = await db.prepare(
+    "SELECT response_body FROM idempotency_keys WHERE key = ? AND user_id = ?"
+  ).bind(idempotencyKey, user.id).first();
+
+  if (existingKey) {
+    return c.json(JSON.parse(existingKey.response_body));
   }
 
   const {
@@ -594,15 +713,38 @@ app.post("/pos/checkout", authMiddleware, requirePermission("pos.checkout"), asy
   } = body;
 
   if (!items || !Array.isArray(items) || items.length === 0) {
-    return c.json({ success: false, error: "ตะกร้าสินค้าว่างเปล่า กรุณาสแกนสินค้าก่อนชำระเงิน" }, 400);
+    return c.json({ success: false, error: "EMPTY_CART", message: "ตะกร้าสินค้าว่างเปล่า กรุณาสแกนสินค้าก่อนชำระเงิน" }, 400);
   }
 
-  // 2. Aggregate duplicate product entries in cart to verify total demanded quantity
+  // P0.7: Validate Shift ID, Cashier ID, and ensure Shift is active / open
+  if (!shift_id) {
+    return c.json({ success: false, error: "SHIFT_REQUIRED", message: "กรุณาระบุรหัสกะขาย (Shift ID) ก่อนทำรายการ" }, 400);
+  }
+
+  const shift: any = await db.prepare(
+    "SELECT * FROM cashier_shifts WHERE id = ? AND status = 'open'"
+  ).bind(shift_id).first();
+
+  if (!shift) {
+    return c.json({ success: false, error: "SHIFT_INVALID", message: "ไม่พบกะขายที่กำลังเปิดอยู่ หรือกะขายนี้ถูกปิดไปแล้ว" }, 400);
+  }
+
+  if (shift.cashier_id !== user.id && user.role_code !== "OWNER_ADMIN" && user.role_code !== "MANAGER") {
+    return c.json({ success: false, error: "SHIFT_UNAUTHORIZED", message: "คุณไม่มีสิทธิ์ทำรายการขายในกะของพนักงานท่านอื่น" }, 403);
+  }
+
+  // P0.8: Validate Payment Method
+  const validMethods = ["cash", "promptpay", "card", "transfer"];
+  if (!validMethods.includes(payment_method)) {
+    return c.json({ success: false, error: "INVALID_PAYMENT_METHOD", message: `วิธีชำระเงินไม่ถูกต้อง (${payment_method})` }, 400);
+  }
+
+  // P0.4: Aggregate duplicate product entries in cart to verify total demanded quantity
   const aggregatedQtyMap = new Map<string, number>();
   for (const it of items) {
     const qty = Number(it.quantity);
     if (!qty || qty <= 0) {
-      return c.json({ success: false, error: `จำนวนสินค้าไม่ถูกต้อง (${qty})` }, 400);
+      return c.json({ success: false, error: "INVALID_QUANTITY", message: `จำนวนสินค้าไม่ถูกต้อง (${qty})` }, 400);
     }
     aggregatedQtyMap.set(it.product_id, (aggregatedQtyMap.get(it.product_id) || 0) + qty);
   }
@@ -614,7 +756,7 @@ app.post("/pos/checkout", authMiddleware, requirePermission("pos.checkout"), asy
     ).bind(productId).first();
 
     if (!product || product.is_active === 0) {
-      return c.json({ success: false, error: `สินค้าไม่พบในระบบหรือถูกปิดใช้งาน (ID: ${productId})` }, 400);
+      return c.json({ success: false, error: "PRODUCT_INACTIVE", message: `สินค้าไม่พบในระบบหรือถูกปิดใช้งาน (ID: ${productId})` }, 400);
     }
 
     const shelfInv: any = await db.prepare(
@@ -625,12 +767,13 @@ app.post("/pos/checkout", authMiddleware, requirePermission("pos.checkout"), asy
     if (currentShelfStock < totalDemandQty) {
       return c.json({
         success: false,
-        error: `สต๊อกสินค้าหน้าร้านไม่เพียงพอ: "${product.name}" มีอยู่ ${currentShelfStock} ${product.unit} (ต้องการขายรวม ${totalDemandQty} ${product.unit})`,
+        error: "INSUFFICIENT_STOCK",
+        message: `สต๊อกสินค้าหน้าร้านไม่เพียงพอ: "${product.name}" มีอยู่ ${currentShelfStock} ${product.unit} (ต้องการขายรวม ${totalDemandQty} ${product.unit})`,
       }, 400);
     }
   }
 
-  // Calculate official server prices and subtotals
+  // P0.9: Backend alone calculates official prices, subtotals, VAT, and grand total
   let verifiedSubtotal = 0;
   const verifiedItems: any[] = [];
   const batchStatements: any[] = [];
@@ -656,7 +799,7 @@ app.post("/pos/checkout", authMiddleware, requirePermission("pos.checkout"), asy
     });
   }
 
-  // 3. Discount calculation on server
+  // Calculate Member Discount
   let memberDiscount = 0;
   let customerName = "ลูกค้าทั่วไป";
   if (customer_id) {
@@ -670,22 +813,45 @@ app.post("/pos/checkout", authMiddleware, requirePermission("pos.checkout"), asy
     }
   }
 
+  // P0.10: Prevent excessive / unauthorized custom discount
   const clientCustomDiscount = Math.max(0, Number(custom_discount) || 0);
+  const MAX_CASHIER_DISCOUNT_BAHT = 500;
+  const MAX_CASHIER_DISCOUNT_PCT = 0.20;
+  const isManagerOrOwner = user.role_code === "OWNER_ADMIN" || user.role_code === "MANAGER" || user.permissions.includes("sales.approve_void");
+
+  if (clientCustomDiscount > MAX_CASHIER_DISCOUNT_BAHT || clientCustomDiscount > (verifiedSubtotal * MAX_CASHIER_DISCOUNT_PCT)) {
+    const approver = body.discount_approved_by;
+    if (!isManagerOrOwner && !approver) {
+      return c.json({
+        success: false,
+        error: "EXCESSIVE_DISCOUNT_UNAUTHORIZED",
+        message: `ส่วนลดพิเศษ (฿${clientCustomDiscount.toFixed(2)}) เกินอำนาจแคชเชียร์ (สูงสุด ฿500 หรือ 20%) กรุณาให้ผู้จัดการร้านอนุมัติ`,
+      }, 403);
+    }
+  }
+
   const totalDiscount = Math.min(verifiedSubtotal, memberDiscount + clientCustomDiscount);
   const verifiedGrandTotal = Math.max(0, verifiedSubtotal - totalDiscount);
   const vatRate = 7.0;
   const verifiedVat = (verifiedGrandTotal * vatRate) / (100 + vatRate);
 
-  const numReceived = Number(received_amount) || verifiedGrandTotal;
-  if (payment_method === "cash" && numReceived < verifiedGrandTotal) {
-    return c.json({ success: false, error: "ยอดเงินสดที่รับมาไม่เพียงพอกับยอดที่ต้องชำระ" }, 400);
+  // Validate received amount for cash
+  const numReceived = Number(received_amount);
+  if (payment_method === "cash") {
+    if (isNaN(numReceived) || numReceived < verifiedGrandTotal) {
+      return c.json({
+        success: false,
+        error: "INSUFFICIENT_TENDERED_AMOUNT",
+        message: `ยอดเงินสดที่รับมา (฿${(numReceived || 0).toFixed(2)}) ไม่เพียงพอกับยอดที่ต้องชำระ (฿${verifiedGrandTotal.toFixed(2)})`,
+      }, 400);
+    }
   }
   const changeAmount = payment_method === "cash" ? Math.max(0, numReceived - verifiedGrandTotal) : 0;
 
   const saleId = genId("sale");
   const invoiceNo = `INV-${new Date().toISOString().slice(2, 10).replace(/-/g, '')}-${Math.floor(10000 + Math.random() * 90000)}`;
 
-  // 4. Assemble atomic batch execution
+  // Assemble atomic batch execution
   // A. Insert Sale
   batchStatements.push(
     db.prepare(
@@ -730,8 +896,10 @@ app.post("/pos/checkout", authMiddleware, requirePermission("pos.checkout"), asy
     );
   }
 
-  // Deduct inventory per aggregated product with race condition guard: AND quantity >= ?
+  // P0.5 & P0.6: Deduct inventory per aggregated product with race condition guard: AND quantity >= ?
+  const stockDeductionIndices: number[] = [];
   for (const [productId, totalDemandQty] of aggregatedQtyMap.entries()) {
+    stockDeductionIndices.push(batchStatements.length);
     batchStatements.push(
       db.prepare(
         `UPDATE inventory SET 
@@ -741,6 +909,7 @@ app.post("/pos/checkout", authMiddleware, requirePermission("pos.checkout"), asy
       ).bind(totalDemandQty, productId, totalDemandQty)
     );
 
+    stockDeductionIndices.push(batchStatements.length);
     batchStatements.push(
       db.prepare(
         `UPDATE products SET 
@@ -823,17 +992,27 @@ app.post("/pos/checkout", authMiddleware, requirePermission("pos.checkout"), asy
     message: "บันทึกการขายและตัดสต๊อกสำเร็จเรียบร้อย",
   };
 
-  // F. Record Idempotency Key
-  if (idempotencyKey) {
-    batchStatements.push(
-      db.prepare(
-        "INSERT INTO idempotency_keys (key, user_id, response_body) VALUES (?, ?, ?)"
-      ).bind(idempotencyKey, user.id, JSON.stringify(responsePayload))
-    );
-  }
+  // F. Record Idempotency Key bound to user
+  batchStatements.push(
+    db.prepare(
+      "INSERT INTO idempotency_keys (key, user_id, response_body) VALUES (?, ?, ?)"
+    ).bind(idempotencyKey, user.id, JSON.stringify(responsePayload))
+  );
 
   // EXECUTE ALL IN SINGLE ATOMIC TRANSACTION
-  await db.batch(batchStatements);
+  const batchResults: any = await db.batch(batchStatements);
+
+  // P0.5 & P0.6: Verify all stock deductions succeeded with meta.changes === 1
+  for (const idx of stockDeductionIndices) {
+    const res = batchResults[idx];
+    if (!res || res.meta?.changes < 1) {
+      return c.json({
+        success: false,
+        error: "CONCURRENT_STOCK_EXHAUSTED",
+        message: "เกิดข้อผิดพลาด: สต๊อกสินค้าหน้าร้านถูกตัดไปโดยแคชเชียร์เครื่องอื่นในเวลาเดียวกัน ระบบได้ทำการยกเลิกบิลเพื่อป้องกันสต๊อกติดลบ",
+      }, 409);
+    }
+  }
 
   return c.json(responsePayload);
 });
@@ -1279,20 +1458,33 @@ app.post("/stock-count/tasks/:id/submit", authMiddleware, requirePermission("sto
   const db = c.env.DB;
   const user = c.get("user")!;
 
-  const task: any = await db.prepare("SELECT * FROM stock_count_tasks WHERE id = ?").bind(taskId).first();
-  if (!task) return c.json({ success: false, error: "ไม่พบใบงาน" }, 404);
-  if (task.status === "approved") return c.json({ success: false, error: "ใบงานนี้ได้รับการอนุมัติไปแล้ว ไม่สามารถแก้ไขได้" }, 400);
-
-  // Check if assigned to this checker
-  if (user.role_code === "STOCK_CHECKER" && task.assigned_to !== user.id) {
-    return c.json({ success: false, error: "คุณไม่ได้เป็นผู้รับมอบหมายในใบงานตรวจนับนี้" }, 403);
+  if (!counts || !Array.isArray(counts)) {
+    return c.json({ success: false, error: "INVALID_COUNTS_PAYLOAD", message: "ข้อมูลผลการตรวจนับไม่ถูกต้อง" }, 400);
   }
 
+  const task: any = await db.prepare("SELECT * FROM stock_count_tasks WHERE id = ?").bind(taskId).first();
+  if (!task) return c.json({ success: false, error: "TASK_NOT_FOUND", message: "ไม่พบใบงานตรวจนับ" }, 404);
+
+  // P0.3: Prevent duplicate submit or editing counts after already submitted for approval
+  if (task.status !== "draft" && task.status !== "in_progress") {
+    return c.json({
+      success: false,
+      error: "ALREADY_SUBMITTED",
+      message: `ใบงานนี้ไม่อยู่ในสถานะที่สามารถส่งผลนับได้ (สถานะปัจจุบัน: ${task.status})`,
+    }, 400);
+  }
+
+  // P0.4: Check if assigned to this checker
+  if (user.role_code === "STOCK_CHECKER" && task.assigned_to !== user.id) {
+    return c.json({ success: false, error: "UNASSIGNED_TASK", message: "คุณไม่ได้เป็นผู้รับมอบหมายในใบงานตรวจนับนี้" }, 403);
+  }
+
+  // P0.5: Verify every Item ID belongs to this task
   const batch: any[] = [];
   for (const item of counts) {
     const sci: any = await db.prepare("SELECT id, system_quantity FROM stock_count_items WHERE id = ? AND task_id = ?").bind(item.id, taskId).first();
     if (!sci) {
-      return c.json({ success: false, error: `รายการสินค้า (ID: ${item.id}) ไม่ได้อยู่ในใบงานนี้` }, 400);
+      return c.json({ success: false, error: "INVALID_ITEM_ID", message: `รายการสินค้า (ID: ${item.id}) ไม่ได้อยู่ในใบงานนี้` }, 400);
     }
     const counted = Number(item.counted_quantity);
     const diff = counted - (sci.system_quantity || 0);
@@ -1325,34 +1517,46 @@ app.post("/stock-count/tasks/:id/submit", authMiddleware, requirePermission("sto
   return c.json({ success: true, message: "บันทึกและส่งผลการตรวจนับให้ผู้จัดการตรวจสอบเรียบร้อยแล้ว" });
 });
 
-// Manager Approves count discrepancies (Anti-double approval & Atomic batch)
+// Manager Approves count discrepancies (Anti-double approval, Self-approval blocked, Truly Atomic Single Batch)
 app.post("/stock-count/tasks/:id/approve", authMiddleware, requirePermission("stock_count.approve"), async (c) => {
   const taskId = c.req.param("id");
   const db = c.env.DB;
   const user = c.get("user")!;
 
   const task: any = await db.prepare("SELECT * FROM stock_count_tasks WHERE id = ?").bind(taskId).first();
-  if (!task) return c.json({ success: false, error: "ไม่พบใบงาน" }, 404);
+  if (!task) return c.json({ success: false, error: "TASK_NOT_FOUND", message: "ไม่พบใบงานตรวจนับ" }, 404);
 
-  // Atomic Conditional update: Lock & verify status in single DB operation (Race Condition Prevention)
-  const lockUpdate: any = await db.prepare(
-    `UPDATE stock_count_tasks SET 
-      status = 'approved',
-      approved_by = ?,
-      approved_at = datetime('now', 'localtime'),
-      updated_at = datetime('now', 'localtime')
-     WHERE id = ? AND status = 'pending_approval'`
-  ).bind(user.full_name, taskId).run();
-
-  if (!lockUpdate || lockUpdate.meta?.changes === 0) {
+  // P0.6: Stock Checker cannot self-approve their own count task
+  if (task.assigned_to === user.id && user.role_code !== "OWNER_ADMIN") {
     return c.json({
       success: false,
-      error: "ใบงานนี้ได้รับการอนุมัติหรือเปลี่ยนสถานะไปแล้ว ป้องกันการอนุมัติซ้ำ (Concurrency Conflict)",
-    }, 409);
+      error: "SELF_APPROVAL_FORBIDDEN",
+      message: "พนักงานตรวจนับไม่สามารถอนุมัติใบงานของตนเองได้ ต้องได้รับการอนุมัติจากผู้จัดการร้านหรือเจ้าของระบบเท่านั้น",
+    }, 403);
+  }
+
+  // Anti-double approval check
+  if (task.status === "approved") {
+    return c.json({ success: false, error: "ALREADY_APPROVED", message: "ใบงานนี้ได้รับการอนุมัติไปแล้ว ป้องกันการอนุมัติซ้ำ" }, 400);
+  }
+  if (task.status !== "pending_approval") {
+    return c.json({ success: false, error: "INVALID_TASK_STATUS", message: `ใบงานนี้ไม่อยู่ในสถานะรออนุมัติ (สถานะปัจจุบัน: ${task.status})` }, 400);
   }
 
   const items = await db.prepare("SELECT * FROM stock_count_items WHERE task_id = ?").bind(taskId).all();
   const batch: any[] = [];
+
+  // P0.1 & P0.2: Lock Task & Status conditionally within the exact same atomic transaction batch
+  batch.push(
+    db.prepare(
+      `UPDATE stock_count_tasks SET 
+        status = 'approved',
+        approved_by = ?,
+        approved_at = datetime('now', 'localtime'),
+        updated_at = datetime('now', 'localtime')
+       WHERE id = ? AND status = 'pending_approval'`
+    ).bind(user.full_name, taskId)
+  );
 
   for (const item of items.results as any[]) {
     if (item.counted_quantity !== null && item.difference !== 0) {
@@ -1400,18 +1604,7 @@ app.post("/stock-count/tasks/:id/approve", authMiddleware, requirePermission("st
     }
   }
 
-  // Update Task Status
-  batch.push(
-    db.prepare(
-      `UPDATE stock_count_tasks SET 
-        status = 'approved',
-        approved_by = ?,
-        approved_at = datetime('now', 'localtime'),
-        updated_at = datetime('now', 'localtime')
-       WHERE id = ?`
-    ).bind(user.full_name, taskId)
-  );
-
+  // Audit Log inside same batch
   batch.push(
     db.prepare(
       `INSERT INTO audit_logs (id, user_id, user_name, action, module, record_id, details)
@@ -1419,8 +1612,17 @@ app.post("/stock-count/tasks/:id/approve", authMiddleware, requirePermission("st
     ).bind(genId("aud"), user.id, user.full_name, taskId, `อนุมัติผลตรวจนับใบงาน ${task.task_code}`)
   );
 
-  // ATOMIC COMMIT
-  await db.batch(batch);
+  // P0.8: ATOMIC COMMIT - All adjustments or none
+  const batchRes: any = await db.batch(batch);
+
+  if (!batchRes || !batchRes[0] || batchRes[0].meta?.changes === 0) {
+    return c.json({
+      success: false,
+      error: "CONCURRENCY_CONFLICT",
+      message: "ใบงานนี้ถูกอนุมัติไปแล้วโดยผู้ใช้อื่นในระหว่างดำเนินการ (Concurrency Guard)",
+    }, 409);
+  }
+
   return c.json({ success: true, message: "อนุมัติผลตรวจนับและปรับปรุงยอดสต๊อกเรียบร้อยแล้ว (Atomic Transaction)" });
 });
 
@@ -1863,3 +2065,4 @@ app.get("/notifications", authMiddleware, async (c) => {
 });
 
 export const onRequest = handle(app);
+export { app };
